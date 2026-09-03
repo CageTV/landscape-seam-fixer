@@ -1,0 +1,6 @@
+{
+  "AddGitPatcher": {
+    "Url": "\\\\spark\\Claude_Work\\LandscapeSeamFix\\SeamFinderRepo.git",
+    "SelectedProject": "SeamFinder.csproj"
+  }
+}
