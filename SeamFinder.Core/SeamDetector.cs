@@ -144,7 +144,9 @@ public static class SeamDetector
             log($"WARNING: {orderingMismatchWarnings} cells had an unexpected override-priority ordering - " +
                 "decode results for those may be unreliable, investigate before trusting the report.");
 
-        var report = new List<string> { "Worldspace,Edge,CellA_X,CellA_Y,PluginA,CellB_X,CellB_Y,PluginB,SamePlugin,MaxDeltaUnits,WorstVertex" };
+        var report = new List<string> {
+            "Worldspace,Edge,CellA_X,CellA_Y,PluginA,CellB_X,CellB_Y,PluginB,SamePlugin,ModVsBaseEdge,LocalRoughness,MaxDeltaUnits,WorstVertex"
+        };
 
         foreach (var (wsKey, cellDict) in cellsByWorldspace)
         {
@@ -215,6 +217,14 @@ public static class SeamDetector
         return heights;
     }
 
+    // Official base-game masters - anything else (including Creation Club
+    // and the user's own generated patches) counts as "a mod" for the
+    // ModVsBaseEdge classification below.
+    static readonly HashSet<string> BaseGamePlugins = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm"
+    };
+
     static void CompareEdge(List<string> report, FormKey worldspace, string edgeName,
         int ax, int ay, DecodedCell a, int bx, int by, DecodedCell b)
     {
@@ -239,8 +249,38 @@ public static class SeamDetector
 
         if (maxDelta > ToleranceUnits)
         {
+            // A mod's isolated edit touching untouched base-game terrain is
+            // usually a small, standalone patch (e.g. around a player home)
+            // in ordinary terrain - much easier to navigate to and visually
+            // confirm than two big overhaul mods overlapping deep in a
+            // mountain range. True only when exactly one side is base game.
+            var aIsBase = BaseGamePlugins.Contains(a.Plugin);
+            var bIsBase = BaseGamePlugins.Contains(b.Plugin);
+            var modVsBaseEdge = aIsBase != bIsBase;
+
+            // Standard deviation of every vertex in both cells, as a rough
+            // "how rugged is the ground right here" signal - a real mismatch
+            // in otherwise-flat terrain reads as an obvious out-of-place
+            // cliff, while the same delta in already-jagged mountain terrain
+            // blends in and is hard to visually confirm.
+            var roughness = Math.Max(ComputeRoughness(a.Heights), ComputeRoughness(b.Heights));
+
             report.Add($"{worldspace},{edgeName},{ax},{ay},{a.Plugin},{bx},{by},{b.Plugin}," +
-                $"{a.Plugin == b.Plugin},{maxDelta:0.0},{worst}");
+                $"{a.Plugin == b.Plugin},{modVsBaseEdge},{roughness:0.0},{maxDelta:0.0},{worst}");
         }
+    }
+
+    static double ComputeRoughness(float[,] heights)
+    {
+        double sum = 0, sumSq = 0;
+        const int n = 33 * 33;
+        foreach (var h in heights)
+        {
+            sum += h;
+            sumSq += (double)h * h;
+        }
+        var mean = sum / n;
+        var variance = sumSq / n - mean * mean;
+        return Math.Sqrt(Math.Max(0, variance));
     }
 }
