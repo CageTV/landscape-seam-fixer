@@ -14,10 +14,16 @@ public partial class MainWindow : Window
 {
     string? _lastReportPath;
 
+    // Whether OutputFolderBox's current text was set by RefreshOutputFolderDefault
+    // rather than typed by the user - stays true (keep auto-updating the default)
+    // until the user actually edits the field themselves.
+    bool _outputFolderAutoSet = true;
+    bool _suppressOutputTextChanged;
+
     public MainWindow()
     {
         InitializeComponent();
-        OutputFolderBox.Text = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        RefreshOutputFolderDefault();
     }
 
     // --- Mode switching ---
@@ -32,8 +38,54 @@ public partial class MainWindow : Window
         Mo2Panel.Visibility = ModeMo2.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
         VortexPanel.Visibility = ModeVortex.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
         DirectPanel.Visibility = ModeDirect.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
-        CreateMo2ModFolderCheck.IsEnabled = ModeMo2.IsChecked == true;
-        if (ModeMo2.IsChecked != true) CreateMo2ModFolderCheck.IsChecked = false;
+        RefreshOutputFolderDefault();
+    }
+
+    // --- Output folder: smart per-mode default, stays editable ---
+
+    void ModeDataPathBox_TextChanged(object sender, TextChangedEventArgs e) => RefreshOutputFolderDefault();
+
+    void OutputFolderBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (_suppressOutputTextChanged) return;
+        _outputFolderAutoSet = false; // user typed something themselves - stop auto-updating
+    }
+
+    void RefreshOutputFolderDefault()
+    {
+        if (OutputFolderBox is null) return; // not constructed yet
+
+        string? defaultPath = null;
+        string hint = "";
+
+        if (ModeMo2?.IsChecked == true)
+        {
+            var instancePath = Mo2InstancePathBox?.Text.Trim();
+            if (!string.IsNullOrEmpty(instancePath))
+            {
+                defaultPath = Path.Combine(instancePath, "mods", "Landscape Seam Report");
+                hint = "Writes into your MO2 instance's mods folder, so it shows up as an installable mod (a meta.ini is added automatically).";
+            }
+        }
+        else if (ModeVortex?.IsChecked == true)
+        {
+            defaultPath = VortexGameDataPathBox?.Text.Trim();
+            hint = "Writes directly into your game's Data folder, matching where Vortex deploys mods by default.";
+        }
+        else if (ModeDirect?.IsChecked == true)
+        {
+            defaultPath = DirectGameDataPathBox?.Text.Trim();
+            hint = "Writes directly into your game's Data folder.";
+        }
+
+        OutputHintText.Text = hint + " You can change this to any folder you like.";
+
+        if (_outputFolderAutoSet && !string.IsNullOrEmpty(defaultPath))
+        {
+            _suppressOutputTextChanged = true;
+            OutputFolderBox.Text = defaultPath;
+            _suppressOutputTextChanged = false;
+        }
     }
 
     // --- MO2 panel ---
@@ -63,7 +115,11 @@ public partial class MainWindow : Window
             target.Text = dlg.FileName;
     }
 
-    void Mo2InstancePathBox_TextChanged(object sender, TextChangedEventArgs e) => RefreshMo2Instance();
+    void Mo2InstancePathBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        RefreshMo2Instance();
+        RefreshOutputFolderDefault();
+    }
 
     void RefreshMo2Instance()
     {
@@ -181,11 +237,6 @@ public partial class MainWindow : Window
             OutputFolderBox.Text = dlg.FolderName;
     }
 
-    void CreateMo2ModFolderCheck_Changed(object sender, RoutedEventArgs e)
-    {
-        Mo2ModFolderRow.Visibility = CreateMo2ModFolderCheck.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
-    }
-
     // --- Run ---
 
     // Plain data snapshot of every UI value the background thread needs, taken
@@ -298,24 +349,29 @@ public partial class MainWindow : Window
         var outputFolder = OutputFolderBox.Text.Trim();
         Directory.CreateDirectory(outputFolder);
 
-        string targetFolder;
-        if (CreateMo2ModFolderCheck.IsChecked == true)
+        // If we're in MO2 mode and the chosen output folder is actually
+        // inside this instance's mods folder (the default, but the user may
+        // have redirected elsewhere), add a meta.ini so MO2 recognizes it as
+        // an installable mod. Skipped entirely if they pointed output
+        // somewhere else - no meta.ini dropped into an unrelated folder.
+        if (ModeMo2.IsChecked == true)
         {
             var instancePath = Mo2InstancePathBox.Text.Trim();
-            var modName = string.IsNullOrWhiteSpace(Mo2ModNameBox.Text) ? "Landscape Seam Report" : Mo2ModNameBox.Text.Trim();
-            var modsDir = Path.Combine(instancePath, "mods", modName);
-            Directory.CreateDirectory(modsDir);
-            File.WriteAllText(Path.Combine(modsDir, "meta.ini"),
-                "[General]\r\ngameName=SkyrimSE\r\nmodid=0\r\nversion=1.0.0\r\ninstalled=true\r\n");
-            targetFolder = modsDir;
-            AppendLog($"Created MO2 mod folder: {modsDir}");
-        }
-        else
-        {
-            targetFolder = outputFolder;
+            if (!string.IsNullOrEmpty(instancePath))
+            {
+                var modsDir = Path.Combine(instancePath, "mods") + Path.DirectorySeparatorChar;
+                var fullOutput = Path.GetFullPath(outputFolder) + Path.DirectorySeparatorChar;
+                if (fullOutput.StartsWith(Path.GetFullPath(modsDir), StringComparison.OrdinalIgnoreCase))
+                {
+                    var metaPath = Path.Combine(outputFolder, "meta.ini");
+                    if (!File.Exists(metaPath))
+                        File.WriteAllText(metaPath, "[General]\r\ngameName=SkyrimSE\r\nmodid=0\r\nversion=1.0.0\r\ninstalled=true\r\n");
+                    AppendLog($"Wrote meta.ini so this shows up as an MO2 mod: {metaPath}");
+                }
+            }
         }
 
-        var outPath = Path.Combine(targetFolder, "LandscapeSeamReport.csv");
+        var outPath = Path.Combine(outputFolder, "LandscapeSeamReport.csv");
         File.WriteAllLines(outPath, report);
         AppendLog($"Report written to: {outPath}");
         return outPath;

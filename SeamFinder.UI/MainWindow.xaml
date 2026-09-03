@@ -121,7 +121,7 @@
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <TextBlock Grid.Column="0" Text="Game Data folder:"/>
-                        <TextBox Grid.Column="1" x:Name="VortexGameDataPathBox"/>
+                        <TextBox Grid.Column="1" x:Name="VortexGameDataPathBox" TextChanged="ModeDataPathBox_TextChanged"/>
                         <Button Grid.Column="2" Content="Browse..." Click="VortexBrowseGameData_Click"/>
                     </Grid>
                     <Button Content="Auto-detect from Vortex" HorizontalAlignment="Left" Click="VortexAutoDetect_Click"/>
@@ -137,7 +137,7 @@
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0" Text="Game Data folder:"/>
-                    <TextBox Grid.Column="1" x:Name="DirectGameDataPathBox"/>
+                    <TextBox Grid.Column="1" x:Name="DirectGameDataPathBox" TextChanged="ModeDataPathBox_TextChanged"/>
                     <Button Grid.Column="2" Content="Browse..." Click="DirectBrowseGameData_Click"/>
                 </Grid>
             </GroupBox>
@@ -153,20 +153,10 @@
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
                     <TextBlock Grid.Column="0" Text="Output folder:"/>
-                    <TextBox Grid.Column="1" x:Name="OutputFolderBox"/>
+                    <TextBox Grid.Column="1" x:Name="OutputFolderBox" TextChanged="OutputFolderBox_TextChanged"/>
                     <Button Grid.Column="2" Content="Browse..." Click="OutputBrowse_Click"/>
                 </Grid>
-                <CheckBox x:Name="CreateMo2ModFolderCheck" Content="Also create as an MO2 mod folder (adds meta.ini so it shows up as an installable mod)"
-                          Margin="0,6,0,0" Checked="CreateMo2ModFolderCheck_Changed" Unchecked="CreateMo2ModFolderCheck_Changed"/>
-                <Grid x:Name="Mo2ModFolderRow" Margin="0,4,0,0" Visibility="Collapsed">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0" Text="Mod name:"/>
-                    <TextBox Grid.Column="1" x:Name="Mo2ModNameBox" Text="Landscape Seam Report"/>
-                </Grid>
+                <TextBlock x:Name="OutputHintText" Foreground="Gray" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/>
             </StackPanel>
         </GroupBox>
 
