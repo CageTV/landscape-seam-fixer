@@ -188,6 +188,16 @@ public partial class MainWindow : Window
 
     // --- Run ---
 
+    // Plain data snapshot of every UI value the background thread needs, taken
+    // on the UI thread before Task.Run starts. WPF controls can only be read
+    // from the thread that owns them (InvalidOperationException otherwise) -
+    // snapshotting everything up front means the background method never
+    // touches a UI element directly, so there's nothing to get wrong later.
+    record RunSettings(
+        bool IsMo2Mode, bool IsVortexMode,
+        string Mo2InstancePath, string Mo2GameDataPath, string Mo2PluginsTxt, string Mo2LoadOrderTxt, string Mo2ModlistTxt,
+        string VortexGameDataPath, string DirectGameDataPath);
+
     async void RunButton_Click(object sender, RoutedEventArgs e)
     {
         LogBox.Clear();
@@ -197,9 +207,15 @@ public partial class MainWindow : Window
         RunButton.IsEnabled = false;
         RunProgress.Visibility = Visibility.Visible;
 
+        var settings = new RunSettings(
+            ModeMo2.IsChecked == true, ModeVortex.IsChecked == true,
+            Mo2InstancePathBox.Text.Trim(), Mo2GameDataPathBox.Text.Trim(), Mo2PluginsTxtBox.Text.Trim(),
+            Mo2LoadOrderTxtBox.Text.Trim(), Mo2ModlistTxtBox.Text.Trim(),
+            VortexGameDataPathBox.Text.Trim(), DirectGameDataPathBox.Text.Trim());
+
         try
         {
-            var result = await Task.Run(RunDetectionForSelectedMode);
+            var result = await Task.Run(() => RunDetectionForSelectedMode(settings));
             if (result is null) return; // validation error already shown
 
             var (report, seamCount, pluginCount) = result.Value;
@@ -223,32 +239,27 @@ public partial class MainWindow : Window
         }
     }
 
-    (List<string> Report, int SeamCount, int PluginCount)? RunDetectionForSelectedMode()
+    (List<string> Report, int SeamCount, int PluginCount)? RunDetectionForSelectedMode(RunSettings s)
     {
         void Log(string line) => Dispatcher.Invoke(() => AppendLog(line));
 
-        if (ModeMo2.IsChecked == true)
+        if (s.IsMo2Mode)
         {
-            var instancePath = Dispatcher.Invoke(() => Mo2InstancePathBox.Text.Trim());
-            var gameDataPath = Dispatcher.Invoke(() => Mo2GameDataPathBox.Text.Trim());
-            var pluginsTxt = Dispatcher.Invoke(() => Mo2PluginsTxtBox.Text.Trim());
-            var loadOrderTxt = Dispatcher.Invoke(() => Mo2LoadOrderTxtBox.Text.Trim());
-            var modlistTxt = Dispatcher.Invoke(() => Mo2ModlistTxtBox.Text.Trim());
-
-            if (string.IsNullOrEmpty(instancePath) || string.IsNullOrEmpty(gameDataPath))
+            if (string.IsNullOrEmpty(s.Mo2InstancePath) || string.IsNullOrEmpty(s.Mo2GameDataPath))
             {
                 ShowValidation("Please fill in the MO2 instance folder and game Data folder.");
                 return null;
             }
 
-            Log($"MO2 instance: {instancePath}");
-            Log($"plugins.txt: {pluginsTxt}");
-            Log($"loadorder.txt: {loadOrderTxt}");
-            Log($"modlist.txt: {modlistTxt}");
-            Log($"Game Data path: {gameDataPath}");
+            Log($"MO2 instance: {s.Mo2InstancePath}");
+            Log($"plugins.txt: {s.Mo2PluginsTxt}");
+            Log($"loadorder.txt: {s.Mo2LoadOrderTxt}");
+            Log($"modlist.txt: {s.Mo2ModlistTxt}");
+            Log($"Game Data path: {s.Mo2GameDataPath}");
             Log("");
 
-            var resolved = Mo2Resolver.ResolveFromExplicitPaths(pluginsTxt, loadOrderTxt, modlistTxt, instancePath, gameDataPath);
+            var resolved = Mo2Resolver.ResolveFromExplicitPaths(
+                s.Mo2PluginsTxt, s.Mo2LoadOrderTxt, s.Mo2ModlistTxt, s.Mo2InstancePath, s.Mo2GameDataPath);
             Log($"Resolved {resolved.LoadOrder.Count} active plugins to real files.");
             if (resolved.MissingPlugins.Count > 0)
             {
@@ -261,8 +272,7 @@ public partial class MainWindow : Window
         }
         else
         {
-            var dataFolder = Dispatcher.Invoke(() =>
-                ModeVortex.IsChecked == true ? VortexGameDataPathBox.Text.Trim() : DirectGameDataPathBox.Text.Trim());
+            var dataFolder = s.IsVortexMode ? s.VortexGameDataPath : s.DirectGameDataPath;
 
             if (string.IsNullOrEmpty(dataFolder))
             {
