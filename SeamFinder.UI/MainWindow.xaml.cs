@@ -13,6 +13,8 @@ namespace SeamFinder.UI;
 public partial class MainWindow : Window
 {
     string? _lastReportPath;
+    string? _lastFixPluginPath;
+    string? _lastOutputFolder;
 
     // Whether OutputFolderBox's current text was set by RefreshOutputFolderDefault
     // rather than typed by the user - stays true (keep auto-updating the default)
@@ -249,20 +251,28 @@ public partial class MainWindow : Window
         string Mo2InstancePath, string Mo2GameDataPath, string Mo2PluginsTxt, string Mo2LoadOrderTxt, string Mo2ModlistTxt,
         string VortexGameDataPath, string DirectGameDataPath);
 
+    void SetBusy(bool busy)
+    {
+        RunButton.IsEnabled = !busy;
+        FixButton.IsEnabled = !busy;
+        RunProgress.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    RunSettings SnapshotSettings() => new(
+        ModeMo2.IsChecked == true, ModeVortex.IsChecked == true,
+        Mo2InstancePathBox.Text.Trim(), Mo2GameDataPathBox.Text.Trim(), Mo2PluginsTxtBox.Text.Trim(),
+        Mo2LoadOrderTxtBox.Text.Trim(), Mo2ModlistTxtBox.Text.Trim(),
+        VortexGameDataPathBox.Text.Trim(), DirectGameDataPathBox.Text.Trim());
+
     async void RunButton_Click(object sender, RoutedEventArgs e)
     {
         LogBox.Clear();
         ResultText.Text = "";
         OpenReportButton.IsEnabled = false;
         OpenFolderButton.IsEnabled = false;
-        RunButton.IsEnabled = false;
-        RunProgress.Visibility = Visibility.Visible;
+        SetBusy(true);
 
-        var settings = new RunSettings(
-            ModeMo2.IsChecked == true, ModeVortex.IsChecked == true,
-            Mo2InstancePathBox.Text.Trim(), Mo2GameDataPathBox.Text.Trim(), Mo2PluginsTxtBox.Text.Trim(),
-            Mo2LoadOrderTxtBox.Text.Trim(), Mo2ModlistTxtBox.Text.Trim(),
-            VortexGameDataPathBox.Text.Trim(), DirectGameDataPathBox.Text.Trim());
+        var settings = SnapshotSettings();
 
         try
         {
@@ -270,9 +280,16 @@ public partial class MainWindow : Window
             if (result is null) return; // validation error already shown
 
             var (report, seamCount, pluginCount) = result.Value;
-            var outPath = WriteOutput(report);
+            var outputFolder = OutputFolderBox.Text.Trim();
+            Directory.CreateDirectory(outputFolder);
+            EnsureMo2MetaIni(outputFolder);
+
+            var outPath = Path.Combine(outputFolder, "LandscapeSeamReport.csv");
+            File.WriteAllLines(outPath, report);
+            AppendLog($"Report written to: {outPath}");
 
             _lastReportPath = outPath;
+            _lastOutputFolder = outputFolder;
             ResultText.Text = $"Found {seamCount} seam edges across {pluginCount} plugins.";
             OpenReportButton.IsEnabled = true;
             OpenFolderButton.IsEnabled = true;
@@ -285,8 +302,95 @@ public partial class MainWindow : Window
         }
         finally
         {
-            RunButton.IsEnabled = true;
-            RunProgress.Visibility = Visibility.Collapsed;
+            SetBusy(false);
+        }
+    }
+
+    async void FixButton_Click(object sender, RoutedEventArgs e)
+    {
+        LogBox.Clear();
+        ResultText.Text = "";
+        OpenFixPluginButton.IsEnabled = false;
+        OpenFolderButton.IsEnabled = false;
+        SetBusy(true);
+
+        var settings = SnapshotSettings();
+        var outputFolder = OutputFolderBox.Text.Trim();
+
+        try
+        {
+            if (string.IsNullOrEmpty(outputFolder))
+            {
+                ShowValidation("Please choose an output folder.");
+                return;
+            }
+
+            var result = await Task.Run(() => GenerateFixForSelectedMode(settings, outputFolder));
+            if (result is null) return; // validation error already shown
+
+            Dispatcher.Invoke(() => EnsureMo2MetaIni(outputFolder));
+
+            _lastFixPluginPath = result.OutputPath;
+            _lastOutputFolder = outputFolder;
+            ResultText.Text = $"Patched {result.CellsPatched} cells ({result.EdgesFixed} edges). " +
+                "Test in-game before relying on this - see the log above for details.";
+            OpenFixPluginButton.IsEnabled = true;
+            OpenFolderButton.IsEnabled = true;
+        }
+        catch (Exception ex)
+        {
+            AppendLog("");
+            AppendLog("ERROR: " + ex);
+            MessageBox.Show(this, ex.Message, "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally
+        {
+            SetBusy(false);
+        }
+    }
+
+    SeamFixResult? GenerateFixForSelectedMode(RunSettings s, string outputFolder)
+    {
+        void Log(string line) => Dispatcher.Invoke(() => AppendLog(line));
+        const string pluginName = "LandscapeSeamFixes.esp";
+
+        if (s.IsMo2Mode)
+        {
+            if (string.IsNullOrEmpty(s.Mo2InstancePath) || string.IsNullOrEmpty(s.Mo2GameDataPath))
+            {
+                ShowValidation("Please fill in the MO2 instance folder and game Data folder.");
+                return null;
+            }
+
+            Log($"MO2 instance: {s.Mo2InstancePath}");
+            Log($"Game Data path: {s.Mo2GameDataPath}");
+            Log("");
+
+            var resolved = Mo2Resolver.ResolveFromExplicitPaths(
+                s.Mo2PluginsTxt, s.Mo2LoadOrderTxt, s.Mo2ModlistTxt, s.Mo2InstancePath, s.Mo2GameDataPath);
+            Log($"Resolved {resolved.LoadOrder.Count} active plugins to real files.");
+            if (resolved.MissingPlugins.Count > 0)
+            {
+                Log($"WARNING: {resolved.MissingPlugins.Count} active plugins could not be found:");
+                foreach (var m in resolved.MissingPlugins) Log("  " + m);
+            }
+
+            return SeamFixer.GenerateFixPluginForResolvedPlugins(resolved.LoadOrder, pluginName, outputFolder, Log);
+        }
+        else
+        {
+            var dataFolder = s.IsVortexMode ? s.VortexGameDataPath : s.DirectGameDataPath;
+
+            if (string.IsNullOrEmpty(dataFolder))
+            {
+                ShowValidation("Please fill in the game Data folder.");
+                return null;
+            }
+
+            Log($"Game Data path: {dataFolder}");
+            Log("");
+
+            return SeamFixer.GenerateFixPluginForDirectDataFolder(dataFolder, pluginName, outputFolder, Log);
         }
     }
 
@@ -344,37 +448,29 @@ public partial class MainWindow : Window
         Dispatcher.Invoke(() => MessageBox.Show(this, message, "Missing information", MessageBoxButton.OK, MessageBoxImage.Warning));
     }
 
-    string WriteOutput(List<string> report)
+    // If we're in MO2 mode and the chosen output folder is actually inside
+    // this instance's mods folder (the default, but the user may have
+    // redirected elsewhere), add a meta.ini so MO2 recognizes it as an
+    // installable mod. Skipped entirely if they pointed output somewhere
+    // else - no meta.ini dropped into an unrelated folder. Shared by both
+    // the detection report and the fix plugin, since either can land there.
+    void EnsureMo2MetaIni(string outputFolder)
     {
-        var outputFolder = OutputFolderBox.Text.Trim();
-        Directory.CreateDirectory(outputFolder);
+        if (ModeMo2.IsChecked != true) return;
 
-        // If we're in MO2 mode and the chosen output folder is actually
-        // inside this instance's mods folder (the default, but the user may
-        // have redirected elsewhere), add a meta.ini so MO2 recognizes it as
-        // an installable mod. Skipped entirely if they pointed output
-        // somewhere else - no meta.ini dropped into an unrelated folder.
-        if (ModeMo2.IsChecked == true)
+        var instancePath = Mo2InstancePathBox.Text.Trim();
+        if (string.IsNullOrEmpty(instancePath)) return;
+
+        var modsDir = Path.Combine(instancePath, "mods") + Path.DirectorySeparatorChar;
+        var fullOutput = Path.GetFullPath(outputFolder) + Path.DirectorySeparatorChar;
+        if (!fullOutput.StartsWith(Path.GetFullPath(modsDir), StringComparison.OrdinalIgnoreCase)) return;
+
+        var metaPath = Path.Combine(outputFolder, "meta.ini");
+        if (!File.Exists(metaPath))
         {
-            var instancePath = Mo2InstancePathBox.Text.Trim();
-            if (!string.IsNullOrEmpty(instancePath))
-            {
-                var modsDir = Path.Combine(instancePath, "mods") + Path.DirectorySeparatorChar;
-                var fullOutput = Path.GetFullPath(outputFolder) + Path.DirectorySeparatorChar;
-                if (fullOutput.StartsWith(Path.GetFullPath(modsDir), StringComparison.OrdinalIgnoreCase))
-                {
-                    var metaPath = Path.Combine(outputFolder, "meta.ini");
-                    if (!File.Exists(metaPath))
-                        File.WriteAllText(metaPath, "[General]\r\ngameName=SkyrimSE\r\nmodid=0\r\nversion=1.0.0\r\ninstalled=true\r\n");
-                    AppendLog($"Wrote meta.ini so this shows up as an MO2 mod: {metaPath}");
-                }
-            }
+            File.WriteAllText(metaPath, "[General]\r\ngameName=SkyrimSE\r\nmodid=0\r\nversion=1.0.0\r\ninstalled=true\r\n");
+            AppendLog($"Wrote meta.ini so this shows up as an MO2 mod: {metaPath}");
         }
-
-        var outPath = Path.Combine(outputFolder, "LandscapeSeamReport.csv");
-        File.WriteAllLines(outPath, report);
-        AppendLog($"Report written to: {outPath}");
-        return outPath;
     }
 
     void AppendLog(string line)
@@ -391,9 +487,15 @@ public partial class MainWindow : Window
         Process.Start(new ProcessStartInfo(_lastReportPath) { UseShellExecute = true });
     }
 
+    void OpenFixPluginButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_lastFixPluginPath is null) return;
+        Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{_lastFixPluginPath}\"") { UseShellExecute = true });
+    }
+
     void OpenFolderButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_lastReportPath is null) return;
-        Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{_lastReportPath}\"") { UseShellExecute = true });
+        if (_lastOutputFolder is null) return;
+        Process.Start(new ProcessStartInfo("explorer.exe", $"\"{_lastOutputFolder}\"") { UseShellExecute = true });
     }
 }

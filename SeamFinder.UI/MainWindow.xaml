@@ -163,6 +163,8 @@
         <!-- Run row -->
         <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,0,0,10">
             <Button x:Name="RunButton" Content="Run Detection" Padding="20,6" FontWeight="Bold" Click="RunButton_Click"/>
+            <Button x:Name="FixButton" Content="Generate Fix Plugin" Padding="20,6" Margin="8,3,0,3" Click="FixButton_Click"
+                    ToolTip="Fixes isolated cases where a mod's terrain edit borders untouched base-game terrain and the edge doesn't line up. Leaves the mod's data untouched; blends the base-game side toward it. Does not require Run Detection first - independent of the CSV report."/>
             <ProgressBar x:Name="RunProgress" Width="200" Height="20" Margin="12,0,0,0" IsIndeterminate="True" Visibility="Collapsed" VerticalAlignment="Center"/>
         </StackPanel>
 
@@ -180,10 +182,12 @@
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0" x:Name="ResultText" Text="" FontWeight="Bold" VerticalAlignment="Center"/>
             <Button Grid.Column="1" x:Name="OpenReportButton" Content="Open Report" IsEnabled="False" Click="OpenReportButton_Click" Margin="0,0,8,0"/>
-            <Button Grid.Column="2" x:Name="OpenFolderButton" Content="Open Folder" IsEnabled="False" Click="OpenFolderButton_Click"/>
+            <Button Grid.Column="2" x:Name="OpenFixPluginButton" Content="Open Fix Plugin" IsEnabled="False" Click="OpenFixPluginButton_Click" Margin="0,0,8,0"/>
+            <Button Grid.Column="3" x:Name="OpenFolderButton" Content="Open Folder" IsEnabled="False" Click="OpenFolderButton_Click"/>
         </Grid>
     </Grid>
 </Window>
