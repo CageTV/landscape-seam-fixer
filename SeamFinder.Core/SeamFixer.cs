@@ -32,6 +32,34 @@ public static class SeamFixer
     // tapers across. Larger = gentler but touches more terrain.
     const int BlendWidth = 6;
 
+    // Cells whose own terrain is already this rugged (see ComputeRoughness)
+    // never get queued for a correction, even if they border a genuine
+    // mod-vs-base mismatch that exceeds tolerance. A short, fixed-width
+    // taper assumes it's blending into gently-varying terrain; forced onto
+    // an already-steep/jagged natural slope (a mountainside, a cliff at the
+    // world border) it doesn't read as a smooth join - it folds the mesh
+    // and creates new tears/holes worse than the mismatch it was meant to
+    // fix. Value chosen from real examples: isolated edits that blended
+    // cleanly measured roughness in the low hundreds; a mountain case that
+    // visibly tore the terrain in-game measured 1200-1900. This is
+    // deliberately conservative - skipping one of these just means it stays
+    // in the "not auto-fixed yet" bucket the tool already has for
+    // multi-mod pileups, which is safe; a bad forced blend is not.
+    const float MaxRoughnessForAutoFix = 500f;
+
+    // Corrections larger than this never get queued, regardless of how
+    // smooth the terrain being corrected is. Roughness alone isn't enough -
+    // a perfectly flat/gentle cell forced to absorb a huge height jump from
+    // a wildly different neighbor over just BlendWidth vertices is itself
+    // an unnaturally steep kink, and tears just as badly as forcing a small
+    // correction onto already-rugged terrain does. BlendWidth=6 vertices
+    // spans 6*128=768 game units horizontally; smoothstep's peak slope
+    // partway through the taper runs about 1.5x the naive average rate, so
+    // capping the delta around 600 keeps the steepest point of the taper
+    // under roughly a 50-degree slope - steep, but not the sheer/folded
+    // wall a 1000+ unit correction crammed into the same span produces.
+    const float MaxCorrectionMagnitude = 600f;
+
     static readonly HashSet<string> BaseGamePlugins = new(StringComparer.OrdinalIgnoreCase)
     {
         "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm"
@@ -39,8 +67,22 @@ public static class SeamFixer
 
     record CellData(
         float[,] Heights,
+        float[,] NormalX,
+        float[,] NormalY,
+        float[,] NormalZ,
         string Plugin,
         IModContext<ISkyrimMod, ISkyrimModGetter, Cell, ICellGetter> CellContext);
+
+    // One edge's worth of correction data queued against a base-game cell.
+    // Carries the neighbor's normals alongside its heights so the lighting
+    // can be blended the same way the terrain shape is - see AccumulateBlend.
+    record Correction(
+        string Edge,
+        float[,] SourceHeights,
+        float[,] SourceNormalX,
+        float[,] SourceNormalY,
+        float[,] SourceNormalZ,
+        float Severity);
 
     /// Generates a fix plugin from an already-resolved list of active plugin
     /// files (e.g. from Mo2Resolver), by materializing them into a single
@@ -124,16 +166,17 @@ public static class SeamFixer
 
                 var (landscape, ownerModKey, ownerCellContext) =
                     ResolveWinningLandscapeWithContext(cell.FormKey, linkCache, priorityIndex);
-                if (landscape?.VertexHeightMap is null || ownerCellContext is null) continue;
+                if (landscape?.VertexHeightMap is null || landscape.VertexNormals is null || ownerCellContext is null) continue;
 
                 var heights = DecodeHeights(landscape.VertexHeightMap);
+                var (nx, ny, nz) = DecodeNormals(landscape.VertexNormals);
 
                 if (!cellsByWorldspace.TryGetValue(worldspaceKey, out var cellDict))
                 {
                     cellDict = new Dictionary<(int, int), CellData>();
                     cellsByWorldspace[worldspaceKey] = cellDict;
                 }
-                cellDict[(cell.Grid.Point.X, cell.Grid.Point.Y)] = new CellData(heights, ownerModKey.FileName, ownerCellContext);
+                cellDict[(cell.Grid.Point.X, cell.Grid.Point.Y)] = new CellData(heights, nx, ny, nz, ownerModKey.FileName, ownerCellContext);
             }
 
             log($"Decoded {cellsByWorldspace.Sum(kv => kv.Value.Count)} cells across {cellsByWorldspace.Count} worldspace(s).");
@@ -141,7 +184,7 @@ public static class SeamFixer
             // Pass 2: find ModVsBaseEdge seams, keyed by the base-game cell
             // that needs fixing and which of ITS OWN edges (East/West/
             // North/South) faces the mod's terrain.
-            var corrections = new Dictionary<(FormKey Worldspace, int X, int Y), List<(string Edge, float[,] SourceHeights, float Severity)>>();
+            var corrections = new Dictionary<(FormKey Worldspace, int X, int Y), List<Correction>>();
 
             foreach (var (wsKey, cellDict) in cellsByWorldspace)
             {
@@ -175,20 +218,55 @@ public static class SeamFixer
                 // inward edge of each taper - never a hard cutoff.
                 var deltaAccum = new float[33, 33];
                 var weightAccum = new float[33, 33];
-                foreach (var (myEdge, sourceHeights, _) in edgeList)
+
+                // Vertex normals control shading, not shape - they're stored
+                // completely separately from heights and never touched just
+                // by editing VHGT. Left alone, a corrected cell's lighting
+                // still reflects its OLD, uncorrected slope right where the
+                // taper is strongest, which reads as a dark seam-like
+                // lighting artifact even once the terrain itself lines up
+                // exactly. Blend them the same way, toward the neighbor's
+                // own (already validly-encoded) normal bytes - reusing
+                // AccumulateBlend per channel means this never needs to
+                // know Bethesda's exact normal-vector byte encoding: linear
+                // interpolation between two valid encodings under any
+                // affine encoding scheme equals the same interpolation
+                // between the decoded vectors themselves.
+                var normalXAccum = new float[33, 33];
+                var normalYAccum = new float[33, 33];
+                var normalZAccum = new float[33, 33];
+                // The taper weight at a given vertex depends only on its
+                // position relative to the edge/BlendWidth, never on which
+                // data channel is being blended - so heights and all three
+                // normal channels share the exact same weight values and
+                // can reuse one accumulator instead of tracking four
+                // identical copies.
+                var normalWeightAccumIgnored = new float[33, 33];
+
+                foreach (var c in edgeList)
                 {
-                    AccumulateBlend(cellData.Heights, myEdge, sourceHeights, deltaAccum, weightAccum);
+                    AccumulateBlend(cellData.Heights, c.Edge, c.SourceHeights, deltaAccum, weightAccum);
+                    AccumulateBlend(cellData.NormalX, c.Edge, c.SourceNormalX, normalXAccum, normalWeightAccumIgnored);
+                    AccumulateBlend(cellData.NormalY, c.Edge, c.SourceNormalY, normalYAccum, normalWeightAccumIgnored);
+                    AccumulateBlend(cellData.NormalZ, c.Edge, c.SourceNormalZ, normalZAccum, normalWeightAccumIgnored);
                     edgesFixed++;
                 }
+
+                var workingNormalX = (float[,])cellData.NormalX.Clone();
+                var workingNormalY = (float[,])cellData.NormalY.Clone();
+                var workingNormalZ = (float[,])cellData.NormalZ.Clone();
 
                 for (int vy = 0; vy <= 32; vy++)
                 for (int vx = 0; vx <= 32; vx++)
                 {
                     if (weightAccum[vx, vy] <= 0f) continue;
                     working[vx, vy] += deltaAccum[vx, vy] / weightAccum[vx, vy];
+                    workingNormalX[vx, vy] += normalXAccum[vx, vy] / weightAccum[vx, vy];
+                    workingNormalY[vx, vy] += normalYAccum[vx, vy] / weightAccum[vx, vy];
+                    workingNormalZ[vx, vy] += normalZAccum[vx, vy] / weightAccum[vx, vy];
                 }
 
-                WriteCorrectedCell(cellData.CellContext, patchMod, working);
+                WriteCorrectedCell(cellData.CellContext, patchMod, working, workingNormalX, workingNormalY, workingNormalZ);
             }
 
             Directory.CreateDirectory(outputDirectory);
@@ -237,7 +315,7 @@ public static class SeamFixer
     // AND the mismatch actually exceeds tolerance (mirrors SeamDetector's
     // own check, so this only ever touches edges the report also flagged).
     static void RecordIfModVsBase(
-        Dictionary<(FormKey, int, int), List<(string Edge, float[,] SourceHeights, float Severity)>> corrections,
+        Dictionary<(FormKey, int, int), List<Correction>> corrections,
         FormKey ws, int ax, int ay, CellData a, int bx, int by, CellData b, string edgeBetweenAandB)
     {
         var aIsBase = BaseGamePlugins.Contains(a.Plugin);
@@ -246,29 +324,38 @@ public static class SeamFixer
 
         var maxDelta = ComputeMaxDelta(a.Heights, b.Heights, edgeBetweenAandB);
         if (maxDelta <= SeamDetector.ToleranceUnits) return;
+        if (maxDelta > MaxCorrectionMagnitude) return;
+
+        // The base-game side is the one that would get forcibly blended -
+        // if IT is already rugged/steep natural terrain, forcing a taper
+        // onto it is likely to tear the mesh rather than smooth it. Skip
+        // regardless of how the mod side looks; only the side actually
+        // being edited matters here.
+        var baseSideRoughness = aIsBase ? ComputeRoughness(a.Heights) : ComputeRoughness(b.Heights);
+        if (baseSideRoughness > MaxRoughnessForAutoFix) return;
 
         if (aIsBase)
         {
-            AddCorrection(corrections, ws, ax, ay, edgeBetweenAandB, b.Heights, maxDelta);
+            AddCorrection(corrections, ws, ax, ay, edgeBetweenAandB, b, maxDelta);
         }
         else
         {
             var oppositeEdge = edgeBetweenAandB == "East" ? "West" : "South";
-            AddCorrection(corrections, ws, bx, by, oppositeEdge, a.Heights, maxDelta);
+            AddCorrection(corrections, ws, bx, by, oppositeEdge, a, maxDelta);
         }
     }
 
     static void AddCorrection(
-        Dictionary<(FormKey, int, int), List<(string Edge, float[,] SourceHeights, float Severity)>> corrections,
-        FormKey ws, int x, int y, string myEdge, float[,] sourceHeights, float severity)
+        Dictionary<(FormKey, int, int), List<Correction>> corrections,
+        FormKey ws, int x, int y, string myEdge, CellData source, float severity)
     {
         var key = (ws, x, y);
         if (!corrections.TryGetValue(key, out var list))
         {
-            list = new List<(string, float[,], float)>();
+            list = new List<Correction>();
             corrections[key] = list;
         }
-        list.Add((myEdge, sourceHeights, severity));
+        list.Add(new Correction(myEdge, source.Heights, source.NormalX, source.NormalY, source.NormalZ, severity));
     }
 
     static float ComputeMaxDelta(float[,] a, float[,] b, string edgeName)
@@ -361,7 +448,10 @@ public static class SeamFixer
     static void WriteCorrectedCell(
         IModContext<ISkyrimMod, ISkyrimModGetter, Cell, ICellGetter> cellContext,
         SkyrimMod patchMod,
-        float[,] correctedHeights)
+        float[,] correctedHeights,
+        float[,] correctedNormalX,
+        float[,] correctedNormalY,
+        float[,] correctedNormalZ)
     {
         // GetOrAddAsOverride deep-copies the Cell's own fields, but Landscape
         // is itself a distinct major record (its own FormKey) embedded
@@ -405,7 +495,23 @@ public static class SeamFixer
             Unknown = unknownBytes,
             HeightMap = new Array2d<sbyte>(newDeltas),
         };
+
+        // Normals are packed as plain unsigned bytes (0-255), no offset/
+        // chain-encoding to worry about like VHGT - just clamp each blended
+        // float channel back into byte range.
+        var newNormals = new P3UInt8[33, 33];
+        for (int y = 0; y <= 32; y++)
+        for (int x = 0; x <= 32; x++)
+        {
+            newNormals[x, y] = new P3UInt8(
+                ClampToByte(correctedNormalX[x, y]),
+                ClampToByte(correctedNormalY[x, y]),
+                ClampToByte(correctedNormalZ[x, y]));
+        }
+        writableCell.Landscape.VertexNormals = new Array2d<P3UInt8>(newNormals);
     }
+
+    static byte ClampToByte(float v) => (byte)Math.Clamp(MathF.Round(v), 0f, 255f);
 
     static float[,] DecodeHeights(ILandscapeVertexHeightMapGetter vhgt)
     {
@@ -429,5 +535,46 @@ public static class SeamFixer
             }
         }
         return heights;
+    }
+
+    // Splits the packed per-vertex normal bytes into three plain float
+    // grids (one per channel) so they can run through the same
+    // AccumulateBlend taper logic already used for heights - see the note
+    // at the blend call site for why this sidesteps needing to know
+    // Bethesda's exact normal-vector byte encoding.
+    static (float[,] X, float[,] Y, float[,] Z) DecodeNormals(IReadOnlyArray2d<P3UInt8> normals)
+    {
+        var x = new float[33, 33];
+        var y = new float[33, 33];
+        var z = new float[33, 33];
+        for (int vy = 0; vy <= 32; vy++)
+        for (int vx = 0; vx <= 32; vx++)
+        {
+            var n = normals[vx, vy];
+            x[vx, vy] = n.X;
+            y[vx, vy] = n.Y;
+            z[vx, vy] = n.Z;
+        }
+        return (x, y, z);
+    }
+
+    // Standard deviation of all 1089 vertices - same "how rugged is this
+    // terrain already" signal SeamDetector reports for humans reviewing the
+    // CSV, reused here to decide automatically whether a correction is safe
+    // to apply. Duplicated rather than shared for the same reason
+    // DecodeHeights is: SeamFixer and SeamDetector are meant to stay
+    // independently readable.
+    static double ComputeRoughness(float[,] heights)
+    {
+        double sum = 0, sumSq = 0;
+        const int n = 33 * 33;
+        foreach (var h in heights)
+        {
+            sum += h;
+            sumSq += (double)h * h;
+        }
+        var mean = sum / n;
+        var variance = sumSq / n - mean * mean;
+        return Math.Sqrt(Math.Max(0, variance));
     }
 }

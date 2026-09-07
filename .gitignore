@@ -7,3 +7,10 @@ publish_multifile/
 smoke_out/
 *.log
 For Distribution/
+*.zip
+*.7z
+*.jpg
+*.jpeg
+*.png
+Thumbs.db
+Skyrim Landscape and Water Fixes/
