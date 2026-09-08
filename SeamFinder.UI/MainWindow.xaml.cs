@@ -118,6 +118,7 @@ public partial class MainWindow : Window
             Directory.CreateDirectory(outputFolder);
             var snapshot = new
             {
+                OutputFolder = outputFolder,
                 s.IsMo2Mode, s.IsVortexMode, s.Mo2InstancePath, s.Mo2GameDataPath,
                 s.VortexGameDataPath, s.DirectGameDataPath, s.TrustNorthernRoads,
                 s.TrustCsWaterMod, s.TrustWaterForEnb, s.TrustRealisticWaterTwo,
