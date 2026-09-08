@@ -161,11 +161,32 @@
         </GroupBox>
 
         <!-- Run row -->
-        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,0,0,10">
-            <Button x:Name="RunButton" Content="Run Detection" Padding="20,6" FontWeight="Bold" Click="RunButton_Click"/>
-            <Button x:Name="FixButton" Content="Generate Fix Plugin" Padding="20,6" Margin="8,3,0,3" Click="FixButton_Click"
-                    ToolTip="Fixes isolated cases where a mod's terrain edit borders untouched base-game terrain and the edge doesn't line up. Leaves the mod's data untouched; blends the base-game side toward it. Does not require Run Detection first - independent of the CSV report."/>
-            <ProgressBar x:Name="RunProgress" Width="200" Height="20" Margin="12,0,0,0" IsIndeterminate="True" Visibility="Collapsed" VerticalAlignment="Center"/>
+        <StackPanel Grid.Row="3" Margin="0,0,0,10">
+            <CheckBox x:Name="TrustNorthernRoadsCheck" Content="Trust Northern Roads.esp as a base-game-equivalent mod" Margin="0,0,0,6"
+                      ToolTip="Northern Roads' Nexus page offers two downloads that both install as a plugin literally named &quot;Northern Roads.esp&quot; - the full terrain-reshaping version and a clutter-only version - so this tool can't tell which one you have from the filename alone. Only check this if you're running the FULL version; leave unchecked for the clutter-only version or if you don't have it installed."/>
+            <TextBlock Text="Trusted water mods (restores water records only, never landscape - in priority order):" Foreground="Gray" FontSize="11" Margin="0,0,0,2"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                <CheckBox x:Name="TrustCsWaterModCheck" Content="CS Water Mod.esp" Margin="0,0,16,0"
+                          ToolTip="Highest priority - restores CS Water Mod.esp's (and its compatibility patches') water data wherever another mod has silently taken over the record."/>
+                <CheckBox x:Name="TrustWaterForEnbCheck" Content="Water for ENB.esp" Margin="0,0,16,0"
+                          ToolTip="Second priority - only wins over CS Water Mod where CS Water Mod isn't also ticked or has no data for that record."/>
+                <CheckBox x:Name="TrustRealisticWaterTwoCheck" Content="RealisticWaterTwo.esp"
+                          ToolTip="Lowest priority of the three - only wins where neither CS Water Mod nor Water for ENB is ticked or has data for that record."/>
+            </StackPanel>
+            <Expander Header="Additional trusted plugins" Margin="0,0,0,6">
+                <StackPanel Margin="6,4,6,0">
+                    <TextBlock Text="One per line - an exact plugin filename, or a prefix ending in * to trust a whole patch family (e.g. &quot;My Landscape Mod -*&quot;). Treated the same as Landscape and Water Fixes/Lux Via: trusted for landscape restoration, resolved by load order alongside them - never above Northern Roads or UniqueLocationsRiverwoodForest.esp."
+                               Foreground="Gray" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
+                    <TextBox x:Name="CustomTrustedPluginsBox" AcceptsReturn="True" TextWrapping="NoWrap"
+                             VerticalScrollBarVisibility="Auto" Height="70" FontFamily="Consolas"/>
+                </StackPanel>
+            </Expander>
+            <StackPanel Orientation="Horizontal">
+                <Button x:Name="RunButton" Content="Run Detection" Padding="20,6" FontWeight="Bold" Click="RunButton_Click"/>
+                <Button x:Name="FixButton" Content="Generate Fix Plugin" Padding="20,6" Margin="8,3,0,3" Click="FixButton_Click"
+                        ToolTip="Fixes isolated cases where a mod's terrain edit borders untouched base-game terrain and the edge doesn't line up. Leaves the mod's data untouched; blends the base-game side toward it. Does not require Run Detection first - independent of the CSV report."/>
+                <ProgressBar x:Name="RunProgress" Width="200" Height="20" Margin="12,0,0,0" IsIndeterminate="True" Visibility="Collapsed" VerticalAlignment="Center"/>
+            </StackPanel>
         </StackPanel>
 
         <!-- Log -->

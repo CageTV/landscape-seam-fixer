@@ -1,19 +1,24 @@
-// Generates a patch plugin that fixes "isolated mod-vs-base" landscape
-// seams: cases where a mod's landscape edit borders untouched base-game
-// terrain (Skyrim.esm/Update.esm/official DLC masters) and the shared edge
-// doesn't line up. The mod's side is treated as authoritative and left
-// untouched; the base-game cell gets a new override with its edge blended
-// toward the mod's data.
+// Generates a patch plugin that restores landscape a trusted plugin (a base
+// game master, USSEP, the Landscape and Water Fixes family, Landscape Seam
+// Fixes.esp, ...) actually authored for a cell, whenever a later, untrusted
+// plugin has silently discarded it - e.g. a settlement mod that placed an
+// NPC in the same cell without ever touching terrain itself, but which
+// still wins the Landscape sub-record because Creation Kit carried forward
+// its own (unedited, pre-trusted-repair) copy.
 //
-// The blend isn't a hard copy-and-crease at the boundary - it tapers over
-// a few vertices inward using a smoothstep ease (zero slope at both ends),
-// based on the observation that manually nudging-then-undoing landscape in
-// CK snaps edges together with only a small-angle taper, not a sharp kink.
-//
-// Deliberately narrower in scope than the full seam report for a first
-// pass: multi-mod pileups (like a whole region merged by the user's own
-// xEdit-generated patch) have a much murkier "who's actually right" question
-// and are left for later.
+// Earlier versions of this tool instead tried to detect and smoothly blend
+// height/normal MISMATCHES between neighboring cells - useful in principle
+// (it could fix cases with no trusted data to restore at all, like a mod's
+// real edit bordering plain untouched vanilla), but the blend math kept
+// surfacing new failure modes in rugged terrain (row-to-row jaggedness,
+// then normal-vector artifacts baked from that jaggedness) that were hard
+// to fully trust. This version is deliberately much narrower and simpler in
+// exchange for being unambiguously safe: it never computes or blends
+// anything - it only ever copies a trusted plugin's own, already
+// internally-consistent LAND record verbatim over a cell where something
+// else has overwritten it. A cell with no trusted data of its own to
+// restore is left untouched, even if its neighbor is a genuine, real edit
+// with no vanilla-vs-mod conflict for THIS specific cell.
 
 using Mutagen.Bethesda;
 using Mutagen.Bethesda.Environments;
@@ -24,65 +29,152 @@ using Noggog;
 
 namespace SeamFinder.Core;
 
-public record SeamFixResult(int CellsPatched, int EdgesFixed, string OutputPath);
+public record SeamFixResult(int CellsPatched, int EdgesFixed, string OutputPath, float WorstSlopeDegrees, List<string> VerificationWarnings);
+
+// Which water mods (each user-toggled independently) get the same
+// "restore what this mod actually authored, verbatim, whenever something
+// else has silently taken over the record" treatment as landscape gets -
+// entirely separate machinery, though, since Cell.Water/WaterHeight/Flags
+// and Worldspace.Water/LodWater are plain fields, not a distinct
+// sub-record the way Landscape is. In priority order: CS Water Mod wins
+// over Water for ENB, which wins over RealisticWaterTwo, wherever more
+// than one has touched the same cell/worldspace - confirmed by the user
+// as the intended order (their own mod first).
+public record WaterTrustOptions(bool TrustCsWaterMod = false, bool TrustWaterForEnb = false, bool TrustRealisticWaterTwo = false)
+{
+    public static readonly WaterTrustOptions None = new();
+    public bool Any => TrustCsWaterMod || TrustWaterForEnb || TrustRealisticWaterTwo;
+}
 
 public static class SeamFixer
 {
-    // How many vertices inward from the shared edge the blend correction
-    // tapers across. Larger = gentler but touches more terrain.
-    const int BlendWidth = 6;
+    // Each family's base plugin name plus the prefix its own compatibility
+    // patches are named with - mirrors the "Landscape and Water Fixes"
+    // prefix-trust convention elsewhere in this file. Index order IS
+    // priority order (lower index wins when more than one family has
+    // touched the same record) - see WaterFamilyRank.
+    static readonly (string BaseName, string Prefix)[] WaterModFamilies =
+    [
+        ("CS Water Mod.esp", "CS Water Mod"),
+        ("Water for ENB.esp", "Water for ENB"),
+        ("RealisticWaterTwo.esp", "RealisticWaterTwo"),
+    ];
 
-    // Cells whose own terrain is already this rugged (see ComputeRoughness)
-    // never get queued for a correction, even if they border a genuine
-    // mod-vs-base mismatch that exceeds tolerance. A short, fixed-width
-    // taper assumes it's blending into gently-varying terrain; forced onto
-    // an already-steep/jagged natural slope (a mountainside, a cliff at the
-    // world border) it doesn't read as a smooth join - it folds the mesh
-    // and creates new tears/holes worse than the mismatch it was meant to
-    // fix. Value chosen from real examples: isolated edits that blended
-    // cleanly measured roughness in the low hundreds; a mountain case that
-    // visibly tore the terrain in-game measured 1200-1900. This is
-    // deliberately conservative - skipping one of these just means it stays
-    // in the "not auto-fixed yet" bucket the tool already has for
-    // multi-mod pileups, which is safe; a bad forced blend is not.
-    const float MaxRoughnessForAutoFix = 500f;
-
-    // Corrections larger than this never get queued, regardless of how
-    // smooth the terrain being corrected is. Roughness alone isn't enough -
-    // a perfectly flat/gentle cell forced to absorb a huge height jump from
-    // a wildly different neighbor over just BlendWidth vertices is itself
-    // an unnaturally steep kink, and tears just as badly as forcing a small
-    // correction onto already-rugged terrain does. BlendWidth=6 vertices
-    // spans 6*128=768 game units horizontally; smoothstep's peak slope
-    // partway through the taper runs about 1.5x the naive average rate, so
-    // capping the delta around 600 keeps the steepest point of the taper
-    // under roughly a 50-degree slope - steep, but not the sheer/folded
-    // wall a 1000+ unit correction crammed into the same span produces.
-    const float MaxCorrectionMagnitude = 600f;
-
+    // Rank of `plugin` among the enabled water families (0 = highest
+    // priority), or -1 if it isn't a trusted, enabled water plugin at all.
+    static int WaterFamilyRank(string plugin, WaterTrustOptions waterTrust)
+    {
+        Span<bool> enabled = [waterTrust.TrustCsWaterMod, waterTrust.TrustWaterForEnb, waterTrust.TrustRealisticWaterTwo];
+        for (int i = 0; i < WaterModFamilies.Length; i++)
+        {
+            if (!enabled[i]) continue;
+            var (baseName, prefix) = WaterModFamilies[i];
+            if (plugin.Equals(baseName, StringComparison.OrdinalIgnoreCase) || plugin.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return i;
+        }
+        return -1;
+    }
     static readonly HashSet<string> BaseGamePlugins = new(StringComparer.OrdinalIgnoreCase)
     {
-        "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm"
+        "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm",
+        "Unofficial Skyrim Special Edition Patch.esp", "Legacy of the Dragonborn.esm",
+        // Third-party Nexus mod (spaces in the name - distinct from this
+        // tool's own no-spaces output filename), built specifically as a
+        // companion to Landscape and Water Fixes: nexusmods.com/.../59687.
+        "Landscape Seam Fixes.esp",
+        // Falkreath-area landscape overhaul, built to work WITH Northern
+        // Roads (matches its road textures/area rather than fighting it) -
+        // trusted unconditionally, and given priority ABOVE Northern Roads
+        // itself in ResolveTrustedOnlyLandscape below, since it's the one
+        // mod the user has confirmed should win over Northern Roads rather
+        // than the other way around.
+        "UniqueLocationsRiverwoodForest.esp",
+        "Landscape and Water Fixes.esp",
+        "Lux Via.esp",
     };
 
-    record CellData(
-        float[,] Heights,
-        float[,] NormalX,
-        float[,] NormalY,
-        float[,] NormalZ,
-        string Plugin,
-        IModContext<ISkyrimMod, ISkyrimModGetter, Cell, ICellGetter> CellContext);
+    // Every entry above is trusted alongside its own compatibility-patch
+    // family too, not just standalone - most Nexus mods name patches
+    // "<Mod Name> - <what it patches>.esp" (LWF's LFfGM/GotT/Myrwatch/...
+    // patches, Lux Via's dozens of same-prefix patches, ...), so that
+    // convention is auto-derived from each trusted base name below rather
+    // than hardcoded per mod. A few mods use a totally unrelated prefix
+    // scheme instead and need an explicit entry here - confirmed by the
+    // user for Legacy of the Dragonborn specifically (its patches use
+    // "DBM_"/"DBM_CC_"/"LOTD_"/"LOTD_TCC_", nothing derivable from its own
+    // filename). Add future non-standard cases here as they turn up.
+    static readonly Dictionary<string, string[]> NonStandardPatchPrefixes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Legacy of the Dragonborn.esm"] = ["DBM_", "DBM_CC_", "LOTD_", "LOTD_TCC_"],
+    };
 
-    // One edge's worth of correction data queued against a base-game cell.
-    // Carries the neighbor's normals alongside its heights so the lighting
-    // can be blended the same way the terrain shape is - see AccumulateBlend.
-    record Correction(
-        string Edge,
-        float[,] SourceHeights,
-        float[,] SourceNormalX,
-        float[,] SourceNormalY,
-        float[,] SourceNormalZ,
-        float Severity);
+    // True if `plugin` is a compatibility patch belonging to `baseName`'s
+    // family (NOT `baseName` itself) - either the common "<base> - ..."
+    // naming convention, or one of the non-standard prefix sets above.
+    static bool IsPatchOfTrustedBase(string plugin, string baseName)
+    {
+        if (plugin.Equals(baseName, StringComparison.OrdinalIgnoreCase)) return false;
+        var stem = Path.GetFileNameWithoutExtension(baseName);
+        if (plugin.StartsWith(stem + " -", StringComparison.OrdinalIgnoreCase)) return true;
+        if (NonStandardPatchPrefixes.TryGetValue(baseName, out var prefixes))
+            foreach (var prefix in prefixes)
+                if (plugin.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    // True if `plugin` is `baseName` itself or a patch of it, for any
+    // trusted base name - the actual membership test IsBaseGamePlugin uses
+    // for the "ordinary" trusted pool (everything except Northern Roads,
+    // which is opt-in/ambiguous and handled separately below).
+    static bool IsTrustedBaseOrPatch(string plugin) =>
+        BaseGamePlugins.Any(b => plugin.Equals(b, StringComparison.OrdinalIgnoreCase) || IsPatchOfTrustedBase(plugin, b));
+
+    // User-supplied additions to the trusted list (the UI's "Additional
+    // trusted plugins" box) - each entry is either an exact plugin name, or
+    // a prefix ending in "*" to trust a whole patch family the same way
+    // the families above are matched. Kept as a plain ordered list rather
+    // than a HashSet since prefix entries need StartsWith, not just exact
+    // lookup; checked linearly, which is fine at the handful-of-entries
+    // scale a text box realistically holds.
+    static bool MatchesCustomTrust(string plugin, IReadOnlyList<string> customTrustedPlugins)
+    {
+        foreach (var pattern in customTrustedPlugins)
+        {
+            if (pattern.EndsWith('*'))
+            {
+                if (plugin.StartsWith(pattern[..^1], StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            else if (plugin.Equals(pattern, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    // Northern Roads is opt-in, not in the always-on BaseGamePlugins set:
+    // its Nexus page ships two downloads that both install as a plugin
+    // literally named "Northern Roads.esp" - the full terrain-reshaping
+    // version and a clutter-only version - so the filename alone can't
+    // distinguish them. Trusting the wrong one would blend other mods
+    // toward a version that never actually reshaped this terrain. The
+    // caller states which one is actually installed. Its own compatibility-
+    // patch hub ("Northern Roads - <other mod> Patch.esp", e.g. "Northern
+    // Roads - Unique Locations Riverwood patch.esp") is trusted alongside
+    // it the same auto-derived way as everything else, and additionally
+    // given priority ABOVE both plain Northern Roads and whatever it's
+    // patching in ResolveTrustedOnlyLandscape below - a patch exists
+    // specifically to reconcile the two, so it's more authoritative than
+    // either alone wherever they actually overlap. Confirmed necessary in
+    // practice: without that priority, a cell the patch legitimately won
+    // (with its careful reconciliation) looked "untrusted" to this tool,
+    // which overwrote it with plain Northern Roads or plain
+    // UniqueLocationsRiverwoodForest.esp data, undoing the patch and
+    // producing holes/dips at the seam between the two mods.
+    static bool IsNorthernRoadsOrItsPatch(string plugin, bool trustNorthernRoads) =>
+        trustNorthernRoads && (plugin.Equals("Northern Roads.esp", StringComparison.OrdinalIgnoreCase) || IsPatchOfTrustedBase(plugin, "Northern Roads.esp"));
+
+    static bool IsBaseGamePlugin(string plugin, bool trustNorthernRoads, IReadOnlyList<string> customTrustedPlugins) =>
+        IsTrustedBaseOrPatch(plugin)
+        || MatchesCustomTrust(plugin, customTrustedPlugins)
+        || IsNorthernRoadsOrItsPatch(plugin, trustNorthernRoads);
 
     /// Generates a fix plugin from an already-resolved list of active plugin
     /// files (e.g. from Mo2Resolver), by materializing them into a single
@@ -92,7 +184,10 @@ public static class SeamFixer
         List<Mo2Resolver.ResolvedPlugin> loadOrder,
         string outputPluginName,
         string outputDirectory,
-        Action<string> log)
+        Action<string> log,
+        bool trustNorthernRoads = false,
+        WaterTrustOptions? waterTrust = null,
+        IReadOnlyList<string>? customTrustedPlugins = null)
     {
         var mergedFolder = Path.Combine(Path.GetTempPath(), "SeamFixerMerged-" + Guid.NewGuid().ToString("N"));
         log($"Staging {loadOrder.Count} plugin files into {mergedFolder} ...");
@@ -108,7 +203,7 @@ public static class SeamFixer
                 .Build();
 
             var priorityIndex = modKeys.Select((k, idx) => (k, idx)).ToDictionary(x => x.k, x => x.idx);
-            return GenerateFixPluginCore(env.LinkCache, priorityIndex, mergedFolder, outputPluginName, outputDirectory, log);
+            return GenerateFixPluginCore(env.LinkCache, priorityIndex, mergedFolder, outputPluginName, outputDirectory, log, trustNorthernRoads, waterTrust ?? WaterTrustOptions.None, customTrustedPlugins ?? []);
         }
         finally
         {
@@ -125,7 +220,10 @@ public static class SeamFixer
         string dataFolderPath,
         string outputPluginName,
         string outputDirectory,
-        Action<string> log)
+        Action<string> log,
+        bool trustNorthernRoads = false,
+        WaterTrustOptions? waterTrust = null,
+        IReadOnlyList<string>? customTrustedPlugins = null)
     {
         using var env = GameEnvironmentBuilder<ISkyrimMod, ISkyrimModGetter>
             .Create(GameRelease.SkyrimSE)
@@ -136,7 +234,7 @@ public static class SeamFixer
             .Select((listing, idx) => (listing.ModKey, idx))
             .ToDictionary(x => x.ModKey, x => x.idx);
 
-        return GenerateFixPluginCore(env.LinkCache, priorityIndex, dataFolderPath, outputPluginName, outputDirectory, log);
+        return GenerateFixPluginCore(env.LinkCache, priorityIndex, dataFolderPath, outputPluginName, outputDirectory, log, trustNorthernRoads, waterTrust ?? WaterTrustOptions.None, customTrustedPlugins ?? []);
     }
 
     static SeamFixResult GenerateFixPluginCore(
@@ -145,154 +243,232 @@ public static class SeamFixer
         string dataFolderForWrite,
         string outputPluginName,
         string outputDirectory,
-        Action<string> log)
+        Action<string> log,
+        bool trustNorthernRoads,
+        WaterTrustOptions waterTrust,
+        IReadOnlyList<string> customTrustedPlugins)
     {
-        {
-            var outputModKey = ModKey.FromNameAndExtension(outputPluginName);
-            var patchMod = new SkyrimMod(outputModKey, SkyrimRelease.SkyrimSE);
+        var outputModKey = ModKey.FromNameAndExtension(outputPluginName);
+        var patchMod = new SkyrimMod(outputModKey, SkyrimRelease.SkyrimSE);
 
-            // Pass 1: decode every exterior cell, keeping the winning CELL's
-            // own mod-context (not just its data) so we can write an
-            // override for it later without re-walking the worldspace
-            // hierarchy by hand.
-            var cellsByWorldspace = new Dictionary<FormKey, Dictionary<(int X, int Y), CellData>>();
+        int cellsPatched = 0;
+        int cellsSkippedWater = 0;
+        int cellsSkippedReference = 0;
+        var verificationWarnings = new List<string>();
+
+        foreach (var context in linkCache.WinningContextOverrides<Cell, ICellGetter>(linkCache))
+        {
+            var cell = context.Record;
+            if (cell.Grid is null) continue;
+            if (!context.TryGetParentSimpleContext<IWorldspaceGetter>(out var wsContext)) continue;
+            // Cell grid (X,Y) coordinates are per-worldspace, not global -
+            // Tamriel's (5,4) and Wyrmstooth's (5,4) are unrelated cells
+            // that just happen to share coordinates. A real load order
+            // carries ~89 worldspaces, so every log line naming bare (X,Y)
+            // needs to say which worldspace too.
+            var wsName = wsContext.Record.EditorID ?? wsContext.Record.FormKey.ToString();
+
+            var (landscape, ownerModKey) = ResolveWinningLandscape(cell.FormKey, linkCache, priorityIndex);
+            if (landscape?.VertexHeightMap is null) continue;
+
+            // The winning owner is already trusted - this IS the
+            // authoritative data, nothing to restore.
+            if (IsBaseGamePlugin(ownerModKey.FileName, trustNorthernRoads, customTrustedPlugins)) continue;
+
+            // Is there a trusted plugin's own repair for this exact cell
+            // that the actual winner has silently discarded? "Discarded"
+            // here doesn't require the untrusted winner to have made a
+            // deliberate edit - Creation Kit carries forward an ITM copy of
+            // whatever the winning chain had at the time a mod touches
+            // anything else in a cell (e.g. placing an NPC), so a mod that
+            // never meant to touch terrain at all can still end up "in
+            // front of" a trusted repair in load order and silently hide
+            // it. Either way, if the trusted plugin's data differs from
+            // what's actually winning, that repair isn't visible in-game
+            // right now.
+            var (trustedLandscape, trustedOwnerModKey) = ResolveTrustedOnlyLandscape(cell.FormKey, linkCache, priorityIndex, trustNorthernRoads, customTrustedPlugins);
+            if (trustedLandscape?.VertexHeightMap is null) continue; // no trusted data exists for this cell at all - nothing to restore
+
+            var actualHeights = DecodeHeights(landscape.VertexHeightMap);
+            var trustedHeights = DecodeHeights(trustedLandscape.VertexHeightMap);
+            if (HeightsMatch(actualHeights, trustedHeights)) continue; // ITM - already matches the trusted repair, nothing to restore
+
+            // Northern Roads reshapes terrain across the whole map, not as
+            // an isolated patch like the rest of the trusted list - the
+            // water/reference caution below exists for small, occasional
+            // repairs where leaving a rare conflicted cell unfixed is a
+            // fine trade. For a full road-network overhaul it isn't: it
+            // means entire stretches of road are left broken (confirmed in
+            // practice - several consecutive road cells right outside
+            // Whiterun all skipped for the same reference-move reason,
+            // producing a visibly disconnected road). The user explicitly
+            // opts into this per-run via trustNorthernRoads, so once that's
+            // on, Northern Roads' own restorations skip both safety gates
+            // below entirely - every OTHER trusted plugin still goes
+            // through them unchanged.
+            string trustedOwnerFileName = trustedOwnerModKey.FileName;
+            var isNorthernRoads = trustedOwnerFileName.Equals("Northern Roads.esp", StringComparison.OrdinalIgnoreCase)
+                || (trustNorthernRoads && trustedOwnerFileName.StartsWith("Northern Roads -", StringComparison.OrdinalIgnoreCase));
+
+            // Water safety: this tool never touches Cell.Water/WaterHeight.
+            // A cell with its own water plane may have that water
+            // calibrated against whatever terrain is CURRENTLY winning;
+            // swapping the terrain out from under it without also fixing
+            // the water risks stranding it above or below the new ground.
+            var hasWater = (cell.WaterHeight.HasValue && cell.WaterHeight.Value < 1_000_000f)
+                || cell.Water.FormKeyNullable.HasValue;
+            if (hasWater && !isNorthernRoads)
+            {
+                cellsSkippedWater++;
+                continue;
+            }
+
+            // Reference safety: a static reference (a wall piece, a rock,
+            // anything placed against the CURRENT terrain) doesn't move
+            // just because we restore different ground under it. Confirmed
+            // necessary in practice earlier this session (a vanilla
+            // ImpExtBldgStraight02 ruin piece ended up floating once its
+            // surrounding ground moved by several hundred units) - same
+            // risk here, just checked across the whole cell instead of a
+            // narrow blend band, since a full-cell swap can move ground
+            // anywhere in it, not just near an edge.
+            var cellOriginX = cell.Grid.Point.X * 4096f;
+            var cellOriginY = cell.Grid.Point.Y * 4096f;
+            var worstReferenceMove = 0f;
+            foreach (var r in cell.Persistent.Concat(cell.Temporary))
+            {
+                if (r.Placement is null) continue;
+                var localX = r.Placement.Position.X - cellOriginX;
+                var localY = r.Placement.Position.Y - cellOriginY;
+                if (localX is < 0f or > 4096f || localY is < 0f or > 4096f) continue;
+                var vx = Math.Clamp((int)Math.Round(localX / 128f), 0, 32);
+                var vy = Math.Clamp((int)Math.Round(localY / 128f), 0, 32);
+                var moved = Math.Abs(trustedHeights[vx, vy] - actualHeights[vx, vy]);
+                if (moved > worstReferenceMove) worstReferenceMove = moved;
+            }
+            if (worstReferenceMove > 20f && !isNorthernRoads)
+            {
+                cellsSkippedReference++;
+                verificationWarnings.Add($"[{wsName}] ({cell.Grid.Point.X},{cell.Grid.Point.Y}): skipped - restoring {trustedOwnerModKey.FileName}'s terrain would move a placed reference's ground by {worstReferenceMove:F0} units");
+                continue;
+            }
+
+            // The actual fix: no blending, no computed normals - just
+            // carry the trusted plugin's own Landscape record forward
+            // verbatim, exactly as it authored it. Written under the TRUE
+            // winning Cell's own context (not the trusted plugin's), so
+            // whichever plugin actually won the Cell overall (e.g. by
+            // placing an NPC) keeps owning its Persistent/Temporary lists -
+            // only the Landscape sub-record is replaced.
+            var writableCell = context.GetOrAddAsOverride(patchMod);
+            foreach (var p in context.Record.Persistent) writableCell.Persistent.Add((IPlaced)p.DeepCopy());
+            foreach (var t in context.Record.Temporary) writableCell.Temporary.Add((IPlaced)t.DeepCopy());
+            writableCell.Landscape = trustedLandscape.DeepCopy();
+
+            var (maxDiff, atX, atY) = MaxHeightDiff(actualHeights, trustedHeights);
+            var bypassNote = isNorthernRoads && (hasWater || worstReferenceMove > 20f)
+                ? $" [Northern Roads bypass: {(hasWater ? "has its own water plane" : $"would move a reference by {worstReferenceMove:F0} units")}, restored anyway]"
+                : "";
+            log($"  Restored [{wsName}] ({cell.Grid.Point.X},{cell.Grid.Point.Y}): {ownerModKey.FileName} had overwritten {trustedOwnerModKey.FileName}'s terrain by up to {maxDiff:F0} units (worst at vertex ({atX},{atY})){bypassNote}");
+            cellsPatched++;
+        }
+
+        // Water pass: completely separate from everything above - never
+        // reads or writes Landscape, only Cell.Water/WaterHeight/Flags and
+        // Worldspace.Water/LodWater. A no-op entirely when no water mod is
+        // ticked (WaterTrustOptions.None), so it can't affect a run that
+        // doesn't ask for it.
+        int cellsWaterPatched = 0;
+        int worldspacesWaterPatched = 0;
+        if (waterTrust.Any)
+        {
+            foreach (var wsContext in linkCache.WinningContextOverrides<Worldspace, IWorldspaceGetter>(linkCache))
+            {
+                var ws = wsContext.Record;
+                var trustedWsWater = ResolveTrustedWorldspaceWaterOnly(ws.FormKey, linkCache, priorityIndex, waterTrust);
+                if (trustedWsWater is null) continue;
+                if (wsContext.ModKey.Equals(trustedWsWater.Value.OwnerModKey)) continue; // trusted mod already wins this worldspace outright
+
+                var writableWs = wsContext.GetOrAddAsOverride(patchMod);
+                bool changedAnything = false;
+                if (trustedWsWater.Value.HasWater) { writableWs.Water = trustedWsWater.Value.Water.AsSetter().AsNullable(); changedAnything = true; }
+                if (trustedWsWater.Value.HasLodWater) { writableWs.LodWater = trustedWsWater.Value.LodWater.AsSetter().AsNullable(); changedAnything = true; }
+                if (!changedAnything) continue;
+
+                log($"  Restored worldspace water [{ws.EditorID}]: {wsContext.ModKey.FileName} had overwritten {trustedWsWater.Value.OwnerModKey.FileName}'s water");
+                worldspacesWaterPatched++;
+            }
 
             foreach (var context in linkCache.WinningContextOverrides<Cell, ICellGetter>(linkCache))
             {
                 var cell = context.Record;
                 if (cell.Grid is null) continue;
+
+                var trustedWater = ResolveTrustedWaterOnlyForCell(cell.FormKey, linkCache, priorityIndex, waterTrust);
+                if (trustedWater is null) continue; // no trusted+enabled water mod has any water data for this cell
+                if (context.ModKey.Equals(trustedWater.Value.OwnerModKey)) continue; // trusted mod already wins this cell outright
+
                 if (!context.TryGetParentSimpleContext<IWorldspaceGetter>(out var wsContext)) continue;
-                var worldspaceKey = wsContext.Record.FormKey;
+                var wsName = wsContext.Record.EditorID ?? wsContext.Record.FormKey.ToString();
 
-                var (landscape, ownerModKey, ownerCellContext) =
-                    ResolveWinningLandscapeWithContext(cell.FormKey, linkCache, priorityIndex);
-                if (landscape?.VertexHeightMap is null || landscape.VertexNormals is null || ownerCellContext is null) continue;
-
-                var heights = DecodeHeights(landscape.VertexHeightMap);
-                var (nx, ny, nz) = DecodeNormals(landscape.VertexNormals);
-
-                if (!cellsByWorldspace.TryGetValue(worldspaceKey, out var cellDict))
+                var writableCell = context.GetOrAddAsOverride(patchMod);
+                if (writableCell.Persistent.Count == 0 && writableCell.Temporary.Count == 0 && context.Record.Persistent.Count + context.Record.Temporary.Count > 0)
                 {
-                    cellDict = new Dictionary<(int, int), CellData>();
-                    cellsByWorldspace[worldspaceKey] = cellDict;
+                    // Only the landscape pass above already populates these -
+                    // if this cell wasn't touched there, this override is
+                    // brand new and needs its object lists carried forward
+                    // too, same reasoning as the landscape write.
+                    foreach (var p in context.Record.Persistent) writableCell.Persistent.Add((IPlaced)p.DeepCopy());
+                    foreach (var t in context.Record.Temporary) writableCell.Temporary.Add((IPlaced)t.DeepCopy());
                 }
-                cellDict[(cell.Grid.Point.X, cell.Grid.Point.Y)] = new CellData(heights, nx, ny, nz, ownerModKey.FileName, ownerCellContext);
+
+                if (trustedWater.Value.HasWaterFlag) writableCell.Flags |= Cell.Flag.HasWater;
+                if (trustedWater.Value.HasWaterLink) writableCell.Water = trustedWater.Value.Water!.AsSetter().AsNullable();
+                writableCell.WaterHeight = trustedWater.Value.WaterHeight;
+
+                log($"  Restored water [{wsName}] ({cell.Grid.Point.X},{cell.Grid.Point.Y}): {context.ModKey.FileName} had overwritten {trustedWater.Value.OwnerModKey.FileName}'s water");
+                cellsWaterPatched++;
             }
 
-            log($"Decoded {cellsByWorldspace.Sum(kv => kv.Value.Count)} cells across {cellsByWorldspace.Count} worldspace(s).");
-
-            // Pass 2: find ModVsBaseEdge seams, keyed by the base-game cell
-            // that needs fixing and which of ITS OWN edges (East/West/
-            // North/South) faces the mod's terrain.
-            var corrections = new Dictionary<(FormKey Worldspace, int X, int Y), List<Correction>>();
-
-            foreach (var (wsKey, cellDict) in cellsByWorldspace)
-            {
-                foreach (var ((x, y), cellA) in cellDict)
-                {
-                    if (cellDict.TryGetValue((x + 1, y), out var cellBEast))
-                        RecordIfModVsBase(corrections, wsKey, x, y, cellA, x + 1, y, cellBEast, "East");
-                    if (cellDict.TryGetValue((x, y + 1), out var cellBNorth))
-                        RecordIfModVsBase(corrections, wsKey, x, y, cellA, x, y + 1, cellBNorth, "North");
-                }
-            }
-
-            log($"Found {corrections.Count} base-game cells bordering a mod edit that need a blend fix.");
-
-            int edgesFixed = 0;
-            foreach (var ((wsKey, x, y), edgeList) in corrections)
-            {
-                var cellData = cellsByWorldspace[wsKey][(x, y)];
-                var working = (float[,])cellData.Heights.Clone();
-
-                // A cell needing fixes on more than one side (e.g. both East
-                // and North) has overlapping blend footprints near the
-                // shared corner. Rather than letting one correction claim
-                // that region exclusively (which leaves it matching neither
-                // neighbor well - sometimes making the abandoned edge worse
-                // than before the fix), accumulate every applicable
-                // correction's pull per-vertex and apply a weighted average,
-                // weighted by each one's own taper strength. A corner
-                // touched by two edges' blends ends up as a compromise
-                // between both targets, fading smoothly to zero at the
-                // inward edge of each taper - never a hard cutoff.
-                var deltaAccum = new float[33, 33];
-                var weightAccum = new float[33, 33];
-
-                // Vertex normals control shading, not shape - they're stored
-                // completely separately from heights and never touched just
-                // by editing VHGT. Left alone, a corrected cell's lighting
-                // still reflects its OLD, uncorrected slope right where the
-                // taper is strongest, which reads as a dark seam-like
-                // lighting artifact even once the terrain itself lines up
-                // exactly. Blend them the same way, toward the neighbor's
-                // own (already validly-encoded) normal bytes - reusing
-                // AccumulateBlend per channel means this never needs to
-                // know Bethesda's exact normal-vector byte encoding: linear
-                // interpolation between two valid encodings under any
-                // affine encoding scheme equals the same interpolation
-                // between the decoded vectors themselves.
-                var normalXAccum = new float[33, 33];
-                var normalYAccum = new float[33, 33];
-                var normalZAccum = new float[33, 33];
-                // The taper weight at a given vertex depends only on its
-                // position relative to the edge/BlendWidth, never on which
-                // data channel is being blended - so heights and all three
-                // normal channels share the exact same weight values and
-                // can reuse one accumulator instead of tracking four
-                // identical copies.
-                var normalWeightAccumIgnored = new float[33, 33];
-
-                foreach (var c in edgeList)
-                {
-                    AccumulateBlend(cellData.Heights, c.Edge, c.SourceHeights, deltaAccum, weightAccum);
-                    AccumulateBlend(cellData.NormalX, c.Edge, c.SourceNormalX, normalXAccum, normalWeightAccumIgnored);
-                    AccumulateBlend(cellData.NormalY, c.Edge, c.SourceNormalY, normalYAccum, normalWeightAccumIgnored);
-                    AccumulateBlend(cellData.NormalZ, c.Edge, c.SourceNormalZ, normalZAccum, normalWeightAccumIgnored);
-                    edgesFixed++;
-                }
-
-                var workingNormalX = (float[,])cellData.NormalX.Clone();
-                var workingNormalY = (float[,])cellData.NormalY.Clone();
-                var workingNormalZ = (float[,])cellData.NormalZ.Clone();
-
-                for (int vy = 0; vy <= 32; vy++)
-                for (int vx = 0; vx <= 32; vx++)
-                {
-                    if (weightAccum[vx, vy] <= 0f) continue;
-                    working[vx, vy] += deltaAccum[vx, vy] / weightAccum[vx, vy];
-                    workingNormalX[vx, vy] += normalXAccum[vx, vy] / weightAccum[vx, vy];
-                    workingNormalY[vx, vy] += normalYAccum[vx, vy] / weightAccum[vx, vy];
-                    workingNormalZ[vx, vy] += normalZAccum[vx, vy] / weightAccum[vx, vy];
-                }
-
-                WriteCorrectedCell(cellData.CellContext, patchMod, working, workingNormalX, workingNormalY, workingNormalZ);
-            }
-
-            Directory.CreateDirectory(outputDirectory);
-            var outputPath = Path.Combine(outputDirectory, outputPluginName);
-            log($"Writing patch plugin to {outputPath} ...");
-            SkyrimMod.WriteBuilder(SkyrimRelease.SkyrimSE)
-                .ToPath(outputPath, fileSystem: null)
-                .WithNoLoadOrder()
-                .WithDataFolder(dataFolderForWrite)
-                .WithAllParentMasters()
-                .Write(patchMod);
-
-            log($"Patched {corrections.Count} cells ({edgesFixed} edges).");
-            return new SeamFixResult(corrections.Count, edgesFixed, outputPath);
+            log($"Restored water in {cellsWaterPatched} cell(s) and {worldspacesWaterPatched} worldspace(s).");
         }
+
+        Directory.CreateDirectory(outputDirectory);
+        var outputPath = Path.Combine(outputDirectory, outputPluginName);
+        log($"Writing patch plugin to {outputPath} ...");
+        SkyrimMod.WriteBuilder(SkyrimRelease.SkyrimSE)
+            .ToPath(outputPath, fileSystem: null)
+            .WithNoLoadOrder()
+            .WithDataFolder(dataFolderForWrite)
+            .WithAllParentMasters()
+            .Write(patchMod);
+
+        log($"Restored {cellsPatched} cell(s) to their trusted plugin's terrain" +
+            (cellsSkippedWater > 0 ? $"; skipped {cellsSkippedWater} with their own water plane" : "") +
+            (cellsSkippedReference > 0 ? $"; skipped {cellsSkippedReference} where a placed reference would move" : "") + ".");
+        if (verificationWarnings.Count > 0)
+        {
+            log($"{verificationWarnings.Count} cell(s) skipped for a reference conflict - worth a manual look if that terrain still looks wrong:");
+            foreach (var w in verificationWarnings) log("  " + w);
+        }
+        return new SeamFixResult(cellsPatched, cellsPatched, outputPath, 0f, verificationWarnings);
     }
 
-    static (ILandscapeGetter? Landscape, ModKey OwnerModKey, IModContext<ISkyrimMod, ISkyrimModGetter, Cell, ICellGetter>? Context)
-        ResolveWinningLandscapeWithContext(
-            FormKey cellFormKey,
-            ILinkCache<ISkyrimMod, ISkyrimModGetter> linkCache,
-            Dictionary<ModKey, int> priorityIndex)
+    // Resolves the winning Landscape sub-record for a cell. Note this can be
+    // owned by a DIFFERENT plugin than the one that wins the Cell overall -
+    // a later plugin can win the Cell (e.g. by adding an NPC) without ever
+    // redeclaring Landscape, leaving an earlier plugin's Landscape as the
+    // one actually in effect. That's exactly why the write path (see
+    // WriteCorrectedCell) targets the outer, TRUE winning Cell context, and
+    // only uses this function's result as the source data to deep-copy and
+    // correct - never as the context to write into.
+    static (ILandscapeGetter? Landscape, ModKey OwnerModKey) ResolveWinningLandscape(
+        FormKey cellFormKey,
+        ILinkCache<ISkyrimMod, ISkyrimModGetter> linkCache,
+        Dictionary<ModKey, int> priorityIndex)
     {
         ILandscapeGetter? best = null;
         ModKey bestModKey = default;
-        IModContext<ISkyrimMod, ISkyrimModGetter, Cell, ICellGetter>? bestContext = null;
         int bestIndex = -1;
 
         foreach (var ctx in linkCache.ResolveAllContexts<Cell, ICellGetter>(cellFormKey, ResolveTarget.Winner))
@@ -304,214 +480,218 @@ public static class SeamFixer
                 bestIndex = idx;
                 best = ctx.Record.Landscape;
                 bestModKey = ctx.ModKey;
-                bestContext = ctx;
             }
         }
 
-        return (best, bestModKey, bestContext);
+        return (best, bestModKey);
     }
 
-    // A cell only gets queued for fixing if exactly one side is base game
-    // AND the mismatch actually exceeds tolerance (mirrors SeamDetector's
-    // own check, so this only ever touches edges the report also flagged).
-    static void RecordIfModVsBase(
-        Dictionary<(FormKey, int, int), List<Correction>> corrections,
-        FormKey ws, int ax, int ay, CellData a, int bx, int by, CellData b, string edgeBetweenAandB)
+    // Same walk as ResolveWinningLandscape, but restricted to contexts whose
+    // owning plugin is itself trusted/base-equivalent - i.e. "what would this
+    // cell's terrain be if only Skyrim.esm/DLC/USSEP/the Landscape and Water
+    // Fixes family/etc. existed, ignoring any untrusted mod's override."
+    // Used by the ITM check below: comparing this against the ACTUAL winning
+    // landscape (which may come from an untrusted plugin) tells us whether
+    // that untrusted plugin really edited the terrain here, or just carried
+    // forward an unchanged copy of what the trusted chain already had.
+    static (ILandscapeGetter? Landscape, ModKey OwnerModKey) ResolveTrustedOnlyLandscape(
+        FormKey cellFormKey,
+        ILinkCache<ISkyrimMod, ISkyrimModGetter> linkCache,
+        Dictionary<ModKey, int> priorityIndex,
+        bool trustNorthernRoads,
+        IReadOnlyList<string> customTrustedPlugins)
     {
-        var aIsBase = BaseGamePlugins.Contains(a.Plugin);
-        var bIsBase = BaseGamePlugins.Contains(b.Plugin);
-        if (aIsBase == bIsBase) return; // both base or both mod - not our scope for this pass
+        ILandscapeGetter? best = null;
+        ModKey bestModKey = default;
+        int bestIndex = -1;
+        ILandscapeGetter? northernRoads = null;
+        ModKey northernRoadsModKey = default;
+        ILandscapeGetter? riverwoodForest = null;
+        ModKey riverwoodForestModKey = default;
+        ILandscapeGetter? northernRoadsPatch = null;
+        ModKey northernRoadsPatchModKey = default;
+        int northernRoadsPatchIndex = -1;
 
-        var maxDelta = ComputeMaxDelta(a.Heights, b.Heights, edgeBetweenAandB);
-        if (maxDelta <= SeamDetector.ToleranceUnits) return;
-        if (maxDelta > MaxCorrectionMagnitude) return;
-
-        // The base-game side is the one that would get forcibly blended -
-        // if IT is already rugged/steep natural terrain, forcing a taper
-        // onto it is likely to tear the mesh rather than smooth it. Skip
-        // regardless of how the mod side looks; only the side actually
-        // being edited matters here.
-        var baseSideRoughness = aIsBase ? ComputeRoughness(a.Heights) : ComputeRoughness(b.Heights);
-        if (baseSideRoughness > MaxRoughnessForAutoFix) return;
-
-        if (aIsBase)
+        foreach (var ctx in linkCache.ResolveAllContexts<Cell, ICellGetter>(cellFormKey, ResolveTarget.Winner))
         {
-            AddCorrection(corrections, ws, ax, ay, edgeBetweenAandB, b, maxDelta);
-        }
-        else
-        {
-            var oppositeEdge = edgeBetweenAandB == "East" ? "West" : "South";
-            AddCorrection(corrections, ws, bx, by, oppositeEdge, a, maxDelta);
-        }
-    }
-
-    static void AddCorrection(
-        Dictionary<(FormKey, int, int), List<Correction>> corrections,
-        FormKey ws, int x, int y, string myEdge, CellData source, float severity)
-    {
-        var key = (ws, x, y);
-        if (!corrections.TryGetValue(key, out var list))
-        {
-            list = new List<Correction>();
-            corrections[key] = list;
-        }
-        list.Add(new Correction(myEdge, source.Heights, source.NormalX, source.NormalY, source.NormalZ, severity));
-    }
-
-    static float ComputeMaxDelta(float[,] a, float[,] b, string edgeName)
-    {
-        float maxDelta = 0;
-        for (int i = 0; i <= 32; i++)
-        {
-            float ha, hb;
-            if (edgeName == "East") { ha = a[32, i]; hb = b[0, i]; }
-            else { ha = a[i, 32]; hb = b[i, 0]; }
-            var d = Math.Abs(ha - hb);
-            if (d > maxDelta) maxDelta = d;
-        }
-        return maxDelta;
-    }
-
-    // Computes the correction this edge alone would want to make - pulling
-    // the cell's boundary toward `source` (the authoritative neighbor),
-    // tapering inward across BlendWidth vertices with a smoothstep ease
-    // (full correction exactly at the boundary, fading to zero with no
-    // slope discontinuity at either end of the transition band) - and adds
-    // its (weight * delta, weight) into the running accumulators instead of
-    // writing to the cell directly. Multiple edges (e.g. a cell needing both
-    // a South and a West correction) naturally overlap near a shared
-    // corner; accumulating lets the final weighted average there reflect a
-    // bit of both targets rather than one excluding the other.
-    //
-    // `originalHeights` (never mutated) is the reference every edge's
-    // target/delta is measured against, so overlapping corrections are
-    // computed independently of each other and only combined at the end.
-    static void AccumulateBlend(float[,] originalHeights, string myEdge, float[,] source, float[,] deltaAccum, float[,] weightAccum)
-    {
-        for (int i = 0; i <= 32; i++)
-        {
-            var (boundaryRow, boundaryCol) = myEdge switch
+            if (ctx.Record.Landscape is null) continue;
+            if (!IsBaseGamePlugin(ctx.ModKey.FileName, trustNorthernRoads, customTrustedPlugins)) continue;
+            string fileName = ctx.ModKey.FileName;
+            var idx = priorityIndex.GetValueOrDefault(ctx.ModKey, -1);
+            if (trustNorthernRoads && fileName.Equals("Northern Roads.esp", StringComparison.OrdinalIgnoreCase))
             {
-                "East" => (32, i),
-                "West" => (0, i),
-                "North" => (i, 32),
-                "South" => (i, 0),
-                _ => throw new InvalidOperationException($"Unknown edge {myEdge}")
-            };
-
-            float targetVal = myEdge switch
+                northernRoads = ctx.Record.Landscape;
+                northernRoadsModKey = ctx.ModKey;
+            }
+            if (fileName.Equals("UniqueLocationsRiverwoodForest.esp", StringComparison.OrdinalIgnoreCase))
             {
-                "East" => source[0, i],
-                "West" => source[32, i],
-                "North" => source[i, 0],
-                "South" => source[i, 32],
-                _ => throw new InvalidOperationException($"Unknown edge {myEdge}")
-            };
-            var delta = targetVal - originalHeights[boundaryRow, boundaryCol];
-
-            for (int step = 0; step < BlendWidth; step++)
+                riverwoodForest = ctx.Record.Landscape;
+                riverwoodForestModKey = ctx.ModKey;
+            }
+            if (trustNorthernRoads && IsPatchOfTrustedBase(fileName, "Northern Roads.esp") && idx > northernRoadsPatchIndex)
             {
-                var (row, col) = myEdge switch
-                {
-                    "East" => (32 - step, i),
-                    "West" => (step, i),
-                    "North" => (i, 32 - step),
-                    "South" => (i, step),
-                    _ => throw new InvalidOperationException($"Unknown edge {myEdge}")
-                };
-
-                var t = 1f - (float)step / BlendWidth; // 1.0 at the boundary, ->0 at BlendWidth in
-                var weight = Smoothstep(t);
-                deltaAccum[row, col] += delta * weight;
-                weightAccum[row, col] += weight;
+                northernRoadsPatchIndex = idx;
+                northernRoadsPatch = ctx.Record.Landscape;
+                northernRoadsPatchModKey = ctx.ModKey;
+            }
+            // A patch always beats its own base mod here, regardless of
+            // load order - not just "usually wins because patches tend to
+            // load after their target," but guaranteed, since a patch's
+            // whole purpose is to be more authoritative than the plain mod
+            // it's patching. Unrelated trusted plugins (different families,
+            // or no family at all) still fall back to ordinary load-order
+            // priority against each other.
+            if (best is null
+                || IsPatchOfTrustedBase(fileName, bestModKey.FileName)
+                || (!IsPatchOfTrustedBase(bestModKey.FileName, fileName) && idx > bestIndex))
+            {
+                bestIndex = idx;
+                best = ctx.Record.Landscape;
+                bestModKey = ctx.ModKey;
             }
         }
+
+        // Northern Roads wins the trusted-only baseline whenever it has any
+        // override for this cell at all, regardless of load order - the
+        // ordinary "highest load-order index among the trusted set" rule
+        // treats every trusted plugin as equally authoritative, which is
+        // right for a handful of occasional patches but wrong for a
+        // full-map road overhaul: a later-loading trusted plugin (e.g. an
+        // LWF-family patch) can carry an ITM/incidental override for the
+        // exact same cell that has nothing to do with the road, and would
+        // otherwise silently outrank - and bury - Northern Roads' actual
+        // road edit just by loading later. Confirmed necessary in practice:
+        // a road cell (grid 4,-5) where Northern Roads' terrain never got
+        // restored even with the tool otherwise working correctly nearby.
+        //
+        // UniqueLocationsRiverwoodForest.esp is ranked ABOVE plain Northern
+        // Roads, not just alongside it - it's a Falkreath landscape
+        // overhaul specifically built to match Northern Roads' own
+        // textures/road area, so where the two disagree for the same cell,
+        // its data is the one meant to be seen, confirmed directly by the
+        // user.
+        //
+        // Northern Roads' own official compatibility patches (see
+        // IsBaseGamePlugin's "Northern Roads -" prefix) rank ABOVE BOTH -
+        // a patch exists specifically to reconcile Northern Roads against
+        // whatever it's patching (URF included), so it's more authoritative
+        // than either mod alone wherever they actually overlap. Confirmed
+        // necessary in practice: without this tier, cells the official
+        // "Northern Roads - Unique Locations Riverwood patch.esp" legitimately
+        // won got silently overwritten with plain URF or plain Northern
+        // Roads data, undoing the patch's reconciliation and producing
+        // holes/dips right at the seam between the two mods.
+        if (northernRoadsPatch is not null) return (northernRoadsPatch, northernRoadsPatchModKey);
+        if (riverwoodForest is not null) return (riverwoodForest, riverwoodForestModKey);
+        if (northernRoads is not null) return (northernRoads, northernRoadsModKey);
+
+        return (best, bestModKey);
     }
 
-    static float Smoothstep(float t)
+    // Finds the highest-priority enabled water mod (see WaterFamilyRank)
+    // that has its OWN real water data for this cell - mirrors the
+    // reference CS Water Mod Synthesis patcher's logic (forward this
+    // plugin's own Flags/Water/WaterHeight whenever it isn't already the
+    // winner), generalized to a ranked set instead of a single mod. A
+    // plugin whose own copy of this cell never touched water at all
+    // (WaterHeight unset, no Water link, HasWater flag unset) has nothing
+    // to contribute and is skipped, same as the script's "nothing to
+    // forward from this cell" early-out.
+    static (bool HasWaterFlag, bool HasWaterLink, IFormLinkNullableGetter<IWaterGetter>? Water, float? WaterHeight, ModKey OwnerModKey)? ResolveTrustedWaterOnlyForCell(
+        FormKey cellFormKey,
+        ILinkCache<ISkyrimMod, ISkyrimModGetter> linkCache,
+        Dictionary<ModKey, int> priorityIndex,
+        WaterTrustOptions waterTrust)
     {
-        t = Math.Clamp(t, 0f, 1f);
-        return t * t * (3f - 2f * t);
+        int bestRank = int.MaxValue;
+        int bestIndex = -1;
+        (bool HasWaterFlag, bool HasWaterLink, IFormLinkNullableGetter<IWaterGetter>? Water, float? WaterHeight, ModKey OwnerModKey)? best = null;
+
+        foreach (var ctx in linkCache.ResolveAllContexts<Cell, ICellGetter>(cellFormKey, ResolveTarget.Winner))
+        {
+            var rank = WaterFamilyRank(ctx.ModKey.FileName, waterTrust);
+            if (rank < 0) continue;
+
+            var hasFlag = ctx.Record.Flags.HasFlag(Cell.Flag.HasWater);
+            var hasLink = ctx.Record.Water.FormKeyNullable.HasValue;
+            if (!hasFlag && !hasLink && !ctx.Record.WaterHeight.HasValue) continue;
+
+            var idx = priorityIndex.GetValueOrDefault(ctx.ModKey, -1);
+            if (rank < bestRank || (rank == bestRank && idx > bestIndex))
+            {
+                bestRank = rank;
+                bestIndex = idx;
+                best = (hasFlag, hasLink, ctx.Record.Water, ctx.Record.WaterHeight, ctx.ModKey);
+            }
+        }
+
+        return best;
     }
 
-    // Re-encodes corrected absolute heights back into the raw delta-byte
-    // format (Offset + 33x33 signed-byte grid, 8 units/step) and writes it
-    // as a new Cell override in patchMod.
-    //
-    // Deltas are computed against the ACTUAL reconstructed running value at
-    // each step (not the ideal corrected target), matching how the game
-    // will really decode them - otherwise rounding to the nearest 8-unit
-    // step could drift away from the intended shape across the 33-vertex
-    // chain. Untouched regions (outside any blend band) reproduce the
-    // exact original bytes with zero rounding error, since the original
-    // heights were themselves exact multiples of 8 apart.
-    static void WriteCorrectedCell(
-        IModContext<ISkyrimMod, ISkyrimModGetter, Cell, ICellGetter> cellContext,
-        SkyrimMod patchMod,
-        float[,] correctedHeights,
-        float[,] correctedNormalX,
-        float[,] correctedNormalY,
-        float[,] correctedNormalZ)
+    // Same idea as ResolveTrustedWaterOnlyForCell, but for the worldspace-
+    // level Water/LodWater fields (the deep-water body and its LOD
+    // counterpart) rather than a specific cell's shallow water.
+    static (bool HasWater, bool HasLodWater, IFormLinkNullableGetter<IWaterGetter> Water, IFormLinkNullableGetter<IWaterGetter> LodWater, ModKey OwnerModKey)? ResolveTrustedWorldspaceWaterOnly(
+        FormKey worldspaceFormKey,
+        ILinkCache<ISkyrimMod, ISkyrimModGetter> linkCache,
+        Dictionary<ModKey, int> priorityIndex,
+        WaterTrustOptions waterTrust)
     {
-        // GetOrAddAsOverride deep-copies the Cell's own fields, but Landscape
-        // is itself a distinct major record (its own FormKey) embedded
-        // inside Cell, not a plain data field - it doesn't cascade
-        // automatically and comes back null. Deep-copy it explicitly,
-        // preserving its FormKey, before touching it.
-        var sourceLandscape = cellContext.Record.Landscape
-            ?? throw new InvalidOperationException("Source cell has no Landscape - should have been filtered out already.");
-        var writableCell = cellContext.GetOrAddAsOverride(patchMod);
-        writableCell.Landscape = sourceLandscape.DeepCopy();
-        var vhgt = writableCell.Landscape!.VertexHeightMap!;
-        var offset = vhgt.Offset;
-        var unknownBytes = vhgt.Unknown;
+        int bestRank = int.MaxValue;
+        int bestIndex = -1;
+        (bool HasWater, bool HasLodWater, IFormLinkNullableGetter<IWaterGetter> Water, IFormLinkNullableGetter<IWaterGetter> LodWater, ModKey OwnerModKey)? best = null;
 
-        var actual = new float[33, 33];
-        var newDeltas = new sbyte[33, 33];
+        foreach (var ctx in linkCache.ResolveAllContexts<Worldspace, IWorldspaceGetter>(worldspaceFormKey, ResolveTarget.Winner))
+        {
+            var rank = WaterFamilyRank(ctx.ModKey.FileName, waterTrust);
+            if (rank < 0) continue;
 
+            var hasWater = ctx.Record.Water.FormKeyNullable.HasValue;
+            var hasLodWater = ctx.Record.LodWater.FormKeyNullable.HasValue;
+            if (!hasWater && !hasLodWater) continue;
+
+            var idx = priorityIndex.GetValueOrDefault(ctx.ModKey, -1);
+            if (rank < bestRank || (rank == bestRank && idx > bestIndex))
+            {
+                bestRank = rank;
+                bestIndex = idx;
+                best = (hasWater, hasLodWater, ctx.Record.Water, ctx.Record.LodWater, ctx.ModKey);
+            }
+        }
+
+        return best;
+    }
+
+    // True if every one of the 1089 vertices matches within a tiny epsilon -
+    // "tiny" rather than exact-zero purely as float-safety margin, since both
+    // sides were decoded through the same delta-step math and a genuinely
+    // unedited/ITM copy reproduces the exact same bytes, not just similar
+    // values. Real edits are never this close by accident - the smallest
+    // legitimate correction this tool itself makes is many units, and hand
+    // authored terrain edits are larger still.
+    static bool HeightsMatch(float[,] a, float[,] b)
+    {
         for (int y = 0; y <= 32; y++)
-        {
-            for (int x = 0; x <= 32; x++)
-            {
-                float prevActual = x == 0
-                    ? (y == 0 ? offset : actual[0, y - 1])
-                    : actual[x - 1, y];
+        for (int x = 0; x <= 32; x++)
+            if (Math.Abs(a[x, y] - b[x, y]) > 0.5f) return false;
+        return true;
+    }
 
-                var diff = correctedHeights[x, y] - prevActual;
-                var deltaSteps = (int)Math.Round(diff / 8.0, MidpointRounding.AwayFromZero);
-                deltaSteps = Math.Clamp(deltaSteps, -128, 127);
-
-                newDeltas[x, y] = (sbyte)deltaSteps;
-                actual[x, y] = prevActual + deltaSteps * 8f;
-            }
-        }
-
-        // HeightMap is init-only on LandscapeVertexHeightMap - can't mutate
-        // the existing instance in place, so build a whole replacement
-        // (Offset and Unknown carried over unchanged) and swap it in.
-        writableCell.Landscape!.VertexHeightMap = new LandscapeVertexHeightMap
-        {
-            Offset = offset,
-            Unknown = unknownBytes,
-            HeightMap = new Array2d<sbyte>(newDeltas),
-        };
-
-        // Normals are packed as plain unsigned bytes (0-255), no offset/
-        // chain-encoding to worry about like VHGT - just clamp each blended
-        // float channel back into byte range.
-        var newNormals = new P3UInt8[33, 33];
+    // Diagnostic companion to HeightsMatch - finds the single worst-mismatched
+    // vertex and where it is, so a failed ITM check can be understood instead
+    // of just trusted as a bare "not identical" verdict.
+    static (float MaxDiff, int X, int Y) MaxHeightDiff(float[,] a, float[,] b)
+    {
+        float maxDiff = 0f;
+        int atX = -1, atY = -1;
         for (int y = 0; y <= 32; y++)
         for (int x = 0; x <= 32; x++)
         {
-            newNormals[x, y] = new P3UInt8(
-                ClampToByte(correctedNormalX[x, y]),
-                ClampToByte(correctedNormalY[x, y]),
-                ClampToByte(correctedNormalZ[x, y]));
+            var d = Math.Abs(a[x, y] - b[x, y]);
+            if (d > maxDiff) { maxDiff = d; atX = x; atY = y; }
         }
-        writableCell.Landscape.VertexNormals = new Array2d<P3UInt8>(newNormals);
+        return (maxDiff, atX, atY);
     }
-
-    static byte ClampToByte(float v) => (byte)Math.Clamp(MathF.Round(v), 0f, 255f);
 
     static float[,] DecodeHeights(ILandscapeVertexHeightMapGetter vhgt)
     {
@@ -537,44 +717,4 @@ public static class SeamFixer
         return heights;
     }
 
-    // Splits the packed per-vertex normal bytes into three plain float
-    // grids (one per channel) so they can run through the same
-    // AccumulateBlend taper logic already used for heights - see the note
-    // at the blend call site for why this sidesteps needing to know
-    // Bethesda's exact normal-vector byte encoding.
-    static (float[,] X, float[,] Y, float[,] Z) DecodeNormals(IReadOnlyArray2d<P3UInt8> normals)
-    {
-        var x = new float[33, 33];
-        var y = new float[33, 33];
-        var z = new float[33, 33];
-        for (int vy = 0; vy <= 32; vy++)
-        for (int vx = 0; vx <= 32; vx++)
-        {
-            var n = normals[vx, vy];
-            x[vx, vy] = n.X;
-            y[vx, vy] = n.Y;
-            z[vx, vy] = n.Z;
-        }
-        return (x, y, z);
-    }
-
-    // Standard deviation of all 1089 vertices - same "how rugged is this
-    // terrain already" signal SeamDetector reports for humans reviewing the
-    // CSV, reused here to decide automatically whether a correction is safe
-    // to apply. Duplicated rather than shared for the same reason
-    // DecodeHeights is: SeamFixer and SeamDetector are meant to stay
-    // independently readable.
-    static double ComputeRoughness(float[,] heights)
-    {
-        double sum = 0, sumSq = 0;
-        const int n = 33 * 33;
-        foreach (var h in heights)
-        {
-            sum += h;
-            sumSq += (double)h * h;
-        }
-        var mean = sum / n;
-        var variance = sumSq / n - mean * mean;
-        return Math.Sqrt(Math.Max(0, variance));
-    }
 }

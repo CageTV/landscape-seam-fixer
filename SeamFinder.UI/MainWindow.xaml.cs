@@ -16,6 +16,12 @@ public partial class MainWindow : Window
     string? _lastFixPluginPath;
     string? _lastOutputFolder;
 
+    // Path AppendLog also mirrors every line to, alongside the LogBox -
+    // set fresh at the start of each run so the log ends up sitting right
+    // next to that run's own esp/csv instead of only living in the UI
+    // (which resets on every relaunch, unlike the output folder's files).
+    string? _currentLogFilePath;
+
     // Whether OutputFolderBox's current text was set by RefreshOutputFolderDefault
     // rather than typed by the user - stays true (keep auto-updating the default)
     // until the user actually edits the field themselves.
@@ -25,7 +31,105 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        LoadPersistedSettings();
         RefreshOutputFolderDefault();
+    }
+
+    // --- Settings persistence ---
+    //
+    // Remembers everything typed into the form (paths, trust checkboxes,
+    // the custom trusted-plugins box) across app launches, so a real load
+    // order's worth of settings only needs entering once. Kept in a stable
+    // per-user location rather than next to the exe - this app gets
+    // rebuilt/republished in place during development, which would
+    // otherwise silently wipe saved settings on every update.
+    static string SettingsFilePath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SeamFinder", "settings.json");
+
+    record PersistedSettings(
+        bool IsMo2Mode, bool IsVortexMode,
+        string Mo2InstancePath, string Mo2GameDataPath, string Mo2PluginsTxt, string Mo2LoadOrderTxt, string Mo2ModlistTxt,
+        string VortexGameDataPath, string DirectGameDataPath, string OutputFolder,
+        bool TrustNorthernRoads, bool TrustCsWaterMod, bool TrustWaterForEnb, bool TrustRealisticWaterTwo,
+        string CustomTrustedPluginsText);
+
+    void LoadPersistedSettings()
+    {
+        try
+        {
+            if (!File.Exists(SettingsFilePath)) return;
+            var s = System.Text.Json.JsonSerializer.Deserialize<PersistedSettings>(File.ReadAllText(SettingsFilePath));
+            if (s is null) return;
+
+            (ModeMo2.IsChecked, ModeVortex.IsChecked, ModeDirect.IsChecked) = s switch
+            {
+                { IsMo2Mode: true } => (true, false, false),
+                { IsVortexMode: true } => (false, true, false),
+                _ => (false, false, true),
+            };
+            Mo2InstancePathBox.Text = s.Mo2InstancePath;
+            Mo2GameDataPathBox.Text = s.Mo2GameDataPath;
+            Mo2PluginsTxtBox.Text = s.Mo2PluginsTxt;
+            Mo2LoadOrderTxtBox.Text = s.Mo2LoadOrderTxt;
+            Mo2ModlistTxtBox.Text = s.Mo2ModlistTxt;
+            VortexGameDataPathBox.Text = s.VortexGameDataPath;
+            DirectGameDataPathBox.Text = s.DirectGameDataPath;
+            TrustNorthernRoadsCheck.IsChecked = s.TrustNorthernRoads;
+            TrustCsWaterModCheck.IsChecked = s.TrustCsWaterMod;
+            TrustWaterForEnbCheck.IsChecked = s.TrustWaterForEnb;
+            TrustRealisticWaterTwoCheck.IsChecked = s.TrustRealisticWaterTwo;
+            CustomTrustedPluginsBox.Text = s.CustomTrustedPluginsText;
+            if (!string.IsNullOrEmpty(s.OutputFolder)) OutputFolderBox.Text = s.OutputFolder; // marks _outputFolderAutoSet false via its own TextChanged handler
+        }
+        catch
+        {
+            // Corrupt or unreadable settings file - start fresh rather than
+            // block the app from opening at all.
+        }
+    }
+
+    void SavePersistedSettings(RunSettings s)
+    {
+        try
+        {
+            var persisted = new PersistedSettings(
+                s.IsMo2Mode, s.IsVortexMode,
+                s.Mo2InstancePath, s.Mo2GameDataPath, s.Mo2PluginsTxt, s.Mo2LoadOrderTxt, s.Mo2ModlistTxt,
+                s.VortexGameDataPath, s.DirectGameDataPath, OutputFolderBox.Text.Trim(),
+                s.TrustNorthernRoads, s.TrustCsWaterMod, s.TrustWaterForEnb, s.TrustRealisticWaterTwo,
+                CustomTrustedPluginsBox.Text);
+            Directory.CreateDirectory(Path.GetDirectoryName(SettingsFilePath)!);
+            File.WriteAllText(SettingsFilePath, System.Text.Json.JsonSerializer.Serialize(persisted, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch
+        {
+            // Best-effort - a locked/inaccessible AppData shouldn't stop the run itself.
+        }
+    }
+
+    // Writes the exact settings a run used into that run's own output
+    // folder too (alongside log.txt/esp/csv), separate from the
+    // always-on-launch copy above - a record of what config produced this
+    // particular output, portable with it if the folder is shared/moved.
+    void SaveSettingsSnapshotToOutputFolder(RunSettings s, string outputFolder)
+    {
+        try
+        {
+            Directory.CreateDirectory(outputFolder);
+            var snapshot = new
+            {
+                s.IsMo2Mode, s.IsVortexMode, s.Mo2InstancePath, s.Mo2GameDataPath,
+                s.VortexGameDataPath, s.DirectGameDataPath, s.TrustNorthernRoads,
+                s.TrustCsWaterMod, s.TrustWaterForEnb, s.TrustRealisticWaterTwo,
+                s.CustomTrustedPlugins,
+            };
+            File.WriteAllText(Path.Combine(outputFolder, "settings-used.json"),
+                System.Text.Json.JsonSerializer.Serialize(snapshot, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch
+        {
+            // Best-effort, same reasoning as SavePersistedSettings.
+        }
     }
 
     // --- Mode switching ---
@@ -249,7 +353,12 @@ public partial class MainWindow : Window
     record RunSettings(
         bool IsMo2Mode, bool IsVortexMode,
         string Mo2InstancePath, string Mo2GameDataPath, string Mo2PluginsTxt, string Mo2LoadOrderTxt, string Mo2ModlistTxt,
-        string VortexGameDataPath, string DirectGameDataPath);
+        string VortexGameDataPath, string DirectGameDataPath, bool TrustNorthernRoads,
+        bool TrustCsWaterMod, bool TrustWaterForEnb, bool TrustRealisticWaterTwo,
+        IReadOnlyList<string> CustomTrustedPlugins)
+    {
+        public WaterTrustOptions WaterTrust => new(TrustCsWaterMod, TrustWaterForEnb, TrustRealisticWaterTwo);
+    }
 
     void SetBusy(bool busy)
     {
@@ -258,11 +367,20 @@ public partial class MainWindow : Window
         RunProgress.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
     }
 
+    // One pattern per line - blank lines ignored, no other syntax (a
+    // trailing "*" for prefix matching is interpreted downstream in
+    // SeamFixer, not here).
+    static IReadOnlyList<string> ParseCustomTrustedPlugins(string text) =>
+        text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
     RunSettings SnapshotSettings() => new(
         ModeMo2.IsChecked == true, ModeVortex.IsChecked == true,
         Mo2InstancePathBox.Text.Trim(), Mo2GameDataPathBox.Text.Trim(), Mo2PluginsTxtBox.Text.Trim(),
         Mo2LoadOrderTxtBox.Text.Trim(), Mo2ModlistTxtBox.Text.Trim(),
-        VortexGameDataPathBox.Text.Trim(), DirectGameDataPathBox.Text.Trim());
+        VortexGameDataPathBox.Text.Trim(), DirectGameDataPathBox.Text.Trim(),
+        TrustNorthernRoadsCheck.IsChecked == true,
+        TrustCsWaterModCheck.IsChecked == true, TrustWaterForEnbCheck.IsChecked == true, TrustRealisticWaterTwoCheck.IsChecked == true,
+        ParseCustomTrustedPlugins(CustomTrustedPluginsBox.Text));
 
     async void RunButton_Click(object sender, RoutedEventArgs e)
     {
@@ -271,8 +389,11 @@ public partial class MainWindow : Window
         OpenReportButton.IsEnabled = false;
         OpenFolderButton.IsEnabled = false;
         SetBusy(true);
+        StartLogFile(OutputFolderBox.Text.Trim());
 
         var settings = SnapshotSettings();
+        SavePersistedSettings(settings);
+        SaveSettingsSnapshotToOutputFolder(settings, OutputFolderBox.Text.Trim());
 
         try
         {
@@ -316,6 +437,9 @@ public partial class MainWindow : Window
 
         var settings = SnapshotSettings();
         var outputFolder = OutputFolderBox.Text.Trim();
+        StartLogFile(outputFolder);
+        SavePersistedSettings(settings);
+        SaveSettingsSnapshotToOutputFolder(settings, outputFolder);
 
         try
         {
@@ -332,8 +456,11 @@ public partial class MainWindow : Window
 
             _lastFixPluginPath = result.OutputPath;
             _lastOutputFolder = outputFolder;
-            ResultText.Text = $"Patched {result.CellsPatched} cells ({result.EdgesFixed} edges). " +
-                "Test in-game before relying on this - see the log above for details.";
+            var verificationSummary = result.VerificationWarnings.Count > 0
+                ? $"{result.VerificationWarnings.Count} cell(s) skipped for a reference conflict (see log)."
+                : "";
+            ResultText.Text = $"Restored {result.CellsPatched} cell(s) to their trusted plugin's terrain. " +
+                $"{verificationSummary} Test in-game before relying on this.";
             OpenFixPluginButton.IsEnabled = true;
             OpenFolderButton.IsEnabled = true;
         }
@@ -375,7 +502,7 @@ public partial class MainWindow : Window
                 foreach (var m in resolved.MissingPlugins) Log("  " + m);
             }
 
-            return SeamFixer.GenerateFixPluginForResolvedPlugins(resolved.LoadOrder, pluginName, outputFolder, Log);
+            return SeamFixer.GenerateFixPluginForResolvedPlugins(resolved.LoadOrder, pluginName, outputFolder, Log, s.TrustNorthernRoads, s.WaterTrust, s.CustomTrustedPlugins);
         }
         else
         {
@@ -390,7 +517,7 @@ public partial class MainWindow : Window
             Log($"Game Data path: {dataFolder}");
             Log("");
 
-            return SeamFixer.GenerateFixPluginForDirectDataFolder(dataFolder, pluginName, outputFolder, Log);
+            return SeamFixer.GenerateFixPluginForDirectDataFolder(dataFolder, pluginName, outputFolder, Log, s.TrustNorthernRoads, s.WaterTrust, s.CustomTrustedPlugins);
         }
     }
 
@@ -422,7 +549,7 @@ public partial class MainWindow : Window
                 foreach (var m in resolved.MissingPlugins) Log("  " + m);
             }
 
-            var detection = SeamDetector.RunForResolvedPlugins(resolved.LoadOrder, Log);
+            var detection = SeamDetector.RunForResolvedPlugins(resolved.LoadOrder, Log, s.TrustNorthernRoads);
             return (detection.ReportCsvLines, detection.SeamCount, detection.PluginCount);
         }
         else
@@ -438,7 +565,7 @@ public partial class MainWindow : Window
             Log($"Game Data path: {dataFolder}");
             Log("");
 
-            var detection = SeamDetector.RunForDirectDataFolder(dataFolder, Log);
+            var detection = SeamDetector.RunForDirectDataFolder(dataFolder, Log, s.TrustNorthernRoads);
             return (detection.ReportCsvLines, detection.SeamCount, detection.PluginCount);
         }
     }
@@ -473,10 +600,36 @@ public partial class MainWindow : Window
         }
     }
 
+    // Points AppendLog's file mirror at <outputFolder>/log.txt and starts it
+    // fresh (matching LogBox.Clear() for the UI copy) - same folder the
+    // esp/csv for this run land in, so all three show up together instead
+    // of the log only ever existing transiently in the UI.
+    void StartLogFile(string outputFolder)
+    {
+        if (string.IsNullOrEmpty(outputFolder)) { _currentLogFilePath = null; return; }
+        try
+        {
+            Directory.CreateDirectory(outputFolder);
+            _currentLogFilePath = Path.Combine(outputFolder, "log.txt");
+            File.WriteAllText(_currentLogFilePath, "");
+        }
+        catch
+        {
+            // Best-effort - a locked/inaccessible output folder shouldn't
+            // stop the run itself, just the file mirror of its log.
+            _currentLogFilePath = null;
+        }
+    }
+
     void AppendLog(string line)
     {
         LogBox.AppendText(line + Environment.NewLine);
         LogBox.ScrollToEnd();
+        if (_currentLogFilePath is not null)
+        {
+            try { File.AppendAllText(_currentLogFilePath, line + Environment.NewLine); }
+            catch { /* best-effort, see StartLogFile */ }
+        }
     }
 
     // --- Result bar ---

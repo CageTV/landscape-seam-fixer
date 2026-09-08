@@ -19,7 +19,12 @@ using Mutagen.Bethesda.Skyrim;
 
 namespace SeamFinder.Core;
 
-public record DecodedCell(float[,] Heights, string Plugin);
+// IsCorrectable mirrors SeamFixer.CellData's field of the same name - see
+// its comment there. True only when this cell's actual data is identical to
+// PURE VANILLA (Skyrim.esm/Update.esm/the three DLCs), not merely to the
+// wider trusted chain - a plugin being trusted doesn't mean a real edit of
+// its is safe to overwrite.
+public record DecodedCell(float[,] Heights, string Plugin, bool IsCorrectable);
 
 public record DetectionResult(
     List<string> ReportCsvLines,
@@ -41,7 +46,8 @@ public static class SeamDetector
     /// merged folder and building a Mutagen environment from it.
     public static DetectionResult RunForResolvedPlugins(
         List<Mo2Resolver.ResolvedPlugin> loadOrder,
-        Action<string> log)
+        Action<string> log,
+        bool trustNorthernRoads = false)
     {
         var mergedFolder = Path.Combine(Path.GetTempPath(), "SeamFinderMerged-" + Guid.NewGuid().ToString("N"));
         log($"Staging {loadOrder.Count} plugin files into {mergedFolder} ...");
@@ -57,7 +63,7 @@ public static class SeamDetector
                 .Build();
 
             var priorityIndex = modKeys.Select((k, idx) => (k, idx)).ToDictionary(x => x.k, x => x.idx);
-            return RunDetection(env.LinkCache, priorityIndex, modKeys.Length, log);
+            return RunDetection(env.LinkCache, priorityIndex, modKeys.Length, log, trustNorthernRoads);
         }
         finally
         {
@@ -70,7 +76,7 @@ public static class SeamDetector
     /// e.g. a non-MO2-managed install, or a folder where mods were dumped
     /// directly into Data). Uses whatever plugins.txt that folder's install
     /// normally resolves to via Mutagen's own auto-detection.
-    public static DetectionResult RunForDirectDataFolder(string dataFolderPath, Action<string> log)
+    public static DetectionResult RunForDirectDataFolder(string dataFolderPath, Action<string> log, bool trustNorthernRoads = false)
     {
         using var env = GameEnvironmentBuilder<ISkyrimMod, ISkyrimModGetter>
             .Create(GameRelease.SkyrimSE)
@@ -81,14 +87,15 @@ public static class SeamDetector
             .Select((listing, idx) => (listing.ModKey, idx))
             .ToDictionary(x => x.ModKey, x => x.idx);
 
-        return RunDetection(env.LinkCache, priorityIndex, env.LoadOrder.Count, log);
+        return RunDetection(env.LinkCache, priorityIndex, env.LoadOrder.Count, log, trustNorthernRoads);
     }
 
     public static DetectionResult RunDetection(
         ILinkCache<ISkyrimMod, ISkyrimModGetter> linkCache,
         Dictionary<ModKey, int> priorityIndex,
         int loadOrderCount,
-        Action<string> log)
+        Action<string> log,
+        bool trustNorthernRoads = false)
     {
         log($"Load order: {loadOrderCount} plugins.");
 
@@ -129,12 +136,32 @@ public static class SeamDetector
 
             var heights = DecodeHeights(landscape.VertexHeightMap);
 
+            // See SeamFixer.CellData.IsCorrectable for the full reasoning:
+            // gated on matching PURE VANILLA (Skyrim.esm/Update.esm/DLCs),
+            // not the wider trusted chain - trusted-chain membership answers
+            // "should I believe this plugin," not "has anyone actually
+            // edited this cell," and only the latter says whether reshaping
+            // it is safe. Kept in sync with SeamFixer's own computation so
+            // this report's ModVsBaseEdge column matches what a Fix run
+            // would actually queue.
+            var isPureVanillaOwner = PureVanillaMasters.Contains(ownerModKey.FileName);
+            var isCorrectable = isPureVanillaOwner;
+            if (!isPureVanillaOwner)
+            {
+                var (vanillaLandscape, _) = ResolvePureVanillaLandscape(cell.FormKey, linkCache, priorityIndex);
+                if (vanillaLandscape?.VertexHeightMap is not null)
+                {
+                    var vanillaHeights = DecodeHeights(vanillaLandscape.VertexHeightMap);
+                    isCorrectable = HeightsMatch(heights, vanillaHeights);
+                }
+            }
+
             if (!cellsByWorldspace.TryGetValue(worldspaceKey, out var cellDict))
             {
                 cellDict = new Dictionary<(int, int), DecodedCell>();
                 cellsByWorldspace[worldspaceKey] = cellDict;
             }
-            cellDict[(cell.Grid.Point.X, cell.Grid.Point.Y)] = new DecodedCell(heights, ownerModKey.FileName);
+            cellDict[(cell.Grid.Point.X, cell.Grid.Point.Y)] = new DecodedCell(heights, ownerModKey.FileName, isCorrectable);
             processed++;
         }
 
@@ -153,10 +180,10 @@ public static class SeamDetector
             foreach (var ((x, y), cellA) in cellDict)
             {
                 if (cellDict.TryGetValue((x + 1, y), out var cellBEast))
-                    CompareEdge(report, wsKey, "East", x, y, cellA, x + 1, y, cellBEast);
+                    CompareEdge(report, wsKey, "East", x, y, cellA, x + 1, y, cellBEast, trustNorthernRoads);
 
                 if (cellDict.TryGetValue((x, y + 1), out var cellBNorth))
-                    CompareEdge(report, wsKey, "North", x, y, cellA, x, y + 1, cellBNorth);
+                    CompareEdge(report, wsKey, "North", x, y, cellA, x, y + 1, cellBNorth, trustNorthernRoads);
             }
         }
 
@@ -193,6 +220,71 @@ public static class SeamDetector
         return (best, bestModKey);
     }
 
+    // Same walk as ResolveWinningLandscape, but restricted to trusted/base-
+    // equivalent plugins only - see SeamFixer.ResolveTrustedOnlyLandscape
+    // (kept in sync with that copy).
+    static (ILandscapeGetter? Landscape, ModKey OwnerModKey) ResolveTrustedOnlyLandscape(
+        FormKey cellFormKey,
+        ILinkCache<ISkyrimMod, ISkyrimModGetter> linkCache,
+        Dictionary<ModKey, int> priorityIndex,
+        bool trustNorthernRoads)
+    {
+        ILandscapeGetter? best = null;
+        ModKey bestModKey = default;
+        int bestIndex = -1;
+
+        foreach (var ctx in linkCache.ResolveAllSimpleContexts<ICellGetter>(cellFormKey, ResolveTarget.Winner))
+        {
+            if (ctx.Record.Landscape is null) continue;
+            if (!IsBaseGamePlugin(ctx.ModKey.FileName, trustNorthernRoads)) continue;
+            var idx = priorityIndex.GetValueOrDefault(ctx.ModKey, -1);
+            if (idx > bestIndex)
+            {
+                bestIndex = idx;
+                best = ctx.Record.Landscape;
+                bestModKey = ctx.ModKey;
+            }
+        }
+
+        return (best, bestModKey);
+    }
+
+    // Same walk again, restricted to the literal game masters only - see
+    // SeamFixer.ResolvePureVanillaLandscape (kept in sync with that copy).
+    static (ILandscapeGetter? Landscape, ModKey OwnerModKey) ResolvePureVanillaLandscape(
+        FormKey cellFormKey,
+        ILinkCache<ISkyrimMod, ISkyrimModGetter> linkCache,
+        Dictionary<ModKey, int> priorityIndex)
+    {
+        ILandscapeGetter? best = null;
+        ModKey bestModKey = default;
+        int bestIndex = -1;
+
+        foreach (var ctx in linkCache.ResolveAllSimpleContexts<ICellGetter>(cellFormKey, ResolveTarget.Winner))
+        {
+            if (ctx.Record.Landscape is null) continue;
+            if (!PureVanillaMasters.Contains(ctx.ModKey.FileName)) continue;
+            var idx = priorityIndex.GetValueOrDefault(ctx.ModKey, -1);
+            if (idx > bestIndex)
+            {
+                bestIndex = idx;
+                best = ctx.Record.Landscape;
+                bestModKey = ctx.ModKey;
+            }
+        }
+
+        return (best, bestModKey);
+    }
+
+    // Kept in sync with SeamFixer.HeightsMatch.
+    static bool HeightsMatch(float[,] a, float[,] b)
+    {
+        for (int y = 0; y <= 32; y++)
+        for (int x = 0; x <= 32; x++)
+            if (Math.Abs(a[x, y] - b[x, y]) > 0.5f) return false;
+        return true;
+    }
+
     static float[,] DecodeHeights(ILandscapeVertexHeightMapGetter vhgt)
     {
         var heights = new float[33, 33];
@@ -217,16 +309,49 @@ public static class SeamDetector
         return heights;
     }
 
-    // Official base-game masters - anything else (including Creation Club
-    // and the user's own generated patches) counts as "a mod" for the
-    // ModVsBaseEdge classification below.
+    // Trusted plugins - not just official base-game masters, also community
+    // fix mods (USSEP, Legacy of the Dragonborn, Landscape Seam Fixes.esp)
+    // whose data is believed over an untrusted mod's. NOT the same question
+    // as "has anyone actually edited this cell" - see PureVanillaMasters and
+    // IsCorrectable below for why that distinction matters.
     static readonly HashSet<string> BaseGamePlugins = new(StringComparer.OrdinalIgnoreCase)
     {
-        "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm"
+        "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm",
+        "Unofficial Skyrim Special Edition Patch.esp", "Legacy of the Dragonborn.esm",
+        // Third-party Nexus mod (spaces in the name - distinct from this
+        // tool's own no-spaces output filename), built specifically as a
+        // companion to Landscape and Water Fixes: nexusmods.com/.../59687.
+        "Landscape Seam Fixes.esp",
     };
 
+    // The actual game master files - a strict subset of BaseGamePlugins
+    // above, with zero deliberate edits by anyone. See
+    // SeamFixer.PureVanillaMasters (kept in sync with that copy) for the
+    // full reasoning: trusted-chain membership answers "should I believe
+    // this plugin," not "has anyone actually changed this cell," and only
+    // the latter decides whether a cell is safe to reshape.
+    static readonly HashSet<string> PureVanillaMasters = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm",
+    };
+
+    // "Landscape and Water Fixes" and its whole patch family (matched by
+    // prefix - dozens of variously-named compatibility patches all carry
+    // the same trust) are treated as trusted/base too, same reasoning as
+    // SeamFixer.IsBaseGamePlugin: the community treats it as a repair to
+    // landscape mistakes Bethesda itself left in, not as new content. Kept
+    // in sync with the fixer's own copy so the report's ModVsBaseEdge
+    // column always matches what the fixer will actually act on.
+    // Northern Roads is opt-in, not always-on - see SeamFixer.IsBaseGamePlugin
+    // for why (two differently-scoped downloads share the exact same
+    // installed filename, so the tool can't tell them apart on its own).
+    static bool IsBaseGamePlugin(string plugin, bool trustNorthernRoads) =>
+        BaseGamePlugins.Contains(plugin)
+        || plugin.StartsWith("Landscape and Water Fixes", StringComparison.OrdinalIgnoreCase)
+        || (trustNorthernRoads && plugin.Equals("Northern Roads.esp", StringComparison.OrdinalIgnoreCase));
+
     static void CompareEdge(List<string> report, FormKey worldspace, string edgeName,
-        int ax, int ay, DecodedCell a, int bx, int by, DecodedCell b)
+        int ax, int ay, DecodedCell a, int bx, int by, DecodedCell b, bool trustNorthernRoads)
     {
         float maxDelta = 0;
         int worst = -1;
@@ -254,8 +379,8 @@ public static class SeamDetector
             // in ordinary terrain - much easier to navigate to and visually
             // confirm than two big overhaul mods overlapping deep in a
             // mountain range. True only when exactly one side is base game.
-            var aIsBase = BaseGamePlugins.Contains(a.Plugin);
-            var bIsBase = BaseGamePlugins.Contains(b.Plugin);
+            var aIsBase = a.IsCorrectable;
+            var bIsBase = b.IsCorrectable;
             var modVsBaseEdge = aIsBase != bIsBase;
 
             // Standard deviation of every vertex in both cells, as a rough

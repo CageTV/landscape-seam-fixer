@@ -19,6 +19,13 @@
 //   - "--fix <instancePath> <profileName> [gameDataPath]": generates
 //     LandscapeSeamFixes.esp for the isolated mod-vs-base-game cases.
 //
+// Add --trust-northern-roads anywhere in the args to treat Northern
+// Roads.esp as base-game-equivalent too. Opt-in rather than always-on:
+// its Nexus page ships two downloads that both install as a plugin
+// literally named "Northern Roads.esp" (full terrain-reshaping version vs.
+// clutter-only), so the tool can't tell which one is installed on its own -
+// only pass this if you have the FULL version.
+//
 // See SeamFinder.Core for the VHGT decode details.
 
 using Mutagen.Bethesda;
@@ -73,13 +80,13 @@ void RunMo2Mode(string[] mo2Args)
 {
     if (mo2Args.Length < 3)
     {
-        Console.WriteLine("Usage: SeamFinder.exe --mo2 <instancePath> <profileName> [gameDataPath]");
+        Console.WriteLine("Usage: SeamFinder.exe --mo2 <instancePath> <profileName> [gameDataPath] [--trust-northern-roads]");
         Console.WriteLine("  gameDataPath is optional - if omitted, reads gamePath from <instancePath>\\ModOrganizer.ini");
         return;
     }
     var instancePath = mo2Args[1];
     var profileName = mo2Args[2];
-    var gameDataPath = mo2Args.Length > 3 ? mo2Args[3] : ReadGamePathFromIni(instancePath);
+    var gameDataPath = mo2Args.Length > 3 && !mo2Args[3].StartsWith("--") ? mo2Args[3] : ReadGamePathFromIni(instancePath);
 
     Console.WriteLine($"MO2 instance: {instancePath}");
     Console.WriteLine($"Profile: {profileName}");
@@ -96,7 +103,7 @@ void RunMo2Mode(string[] mo2Args)
             foreach (var m in resolved.MissingPlugins) Console.WriteLine("  " + m);
         }
 
-        var result = SeamDetector.RunForResolvedPlugins(resolved.LoadOrder, Console.WriteLine);
+        var result = SeamDetector.RunForResolvedPlugins(resolved.LoadOrder, Console.WriteLine, TrustNorthernRoads(mo2Args));
         WriteReport(result.ReportCsvLines, Path.Combine(AppContext.BaseDirectory, "LandscapeSeamReport.csv"));
     }
     catch (Exception ex)
@@ -112,14 +119,14 @@ void RunFixMode(string[] fixArgs)
 {
     if (fixArgs.Length < 3)
     {
-        Console.WriteLine("Usage: SeamFinder.exe --fix <instancePath> <profileName> [gameDataPath]");
+        Console.WriteLine("Usage: SeamFinder.exe --fix <instancePath> <profileName> [gameDataPath] [--trust-northern-roads]");
         Console.WriteLine("  Generates LandscapeSeamFixes.esp fixing isolated mod-vs-base-game seams only.");
         Console.WriteLine("  gameDataPath is optional - if omitted, reads gamePath from <instancePath>\\ModOrganizer.ini");
         return;
     }
     var instancePath = fixArgs[1];
     var profileName = fixArgs[2];
-    var gameDataPath = fixArgs.Length > 3 ? fixArgs[3] : ReadGamePathFromIni(instancePath);
+    var gameDataPath = fixArgs.Length > 3 && !fixArgs[3].StartsWith("--") ? fixArgs[3] : ReadGamePathFromIni(instancePath);
 
     Console.WriteLine($"MO2 instance: {instancePath}");
     Console.WriteLine($"Profile: {profileName}");
@@ -137,9 +144,9 @@ void RunFixMode(string[] fixArgs)
         }
 
         var fixResult = SeamFixer.GenerateFixPluginForResolvedPlugins(
-            resolved.LoadOrder, "LandscapeSeamFixes.esp", AppContext.BaseDirectory, Console.WriteLine);
+            resolved.LoadOrder, "LandscapeSeamFixes.esp", AppContext.BaseDirectory, Console.WriteLine, TrustNorthernRoads(fixArgs), WaterTrust(fixArgs), CustomTrustedPlugins(fixArgs));
         Console.WriteLine();
-        Console.WriteLine($"Patched {fixResult.CellsPatched} cells ({fixResult.EdgesFixed} edges).");
+        Console.WriteLine($"Restored {fixResult.CellsPatched} cell(s) to their trusted plugin's terrain.");
         Console.WriteLine($"Output: {fixResult.OutputPath}");
     }
     catch (Exception ex)
@@ -150,6 +157,20 @@ void RunFixMode(string[] fixArgs)
 
     Pause();
 }
+
+bool TrustNorthernRoads(string[] a) => a.Contains("--trust-northern-roads", StringComparer.OrdinalIgnoreCase);
+
+WaterTrustOptions WaterTrust(string[] a) => new(
+    a.Contains("--trust-cs-water-mod", StringComparer.OrdinalIgnoreCase),
+    a.Contains("--trust-water-for-enb", StringComparer.OrdinalIgnoreCase),
+    a.Contains("--trust-realistic-water-two", StringComparer.OrdinalIgnoreCase));
+
+// Repeatable: --trust-plugin="Some Mod.esp" --trust-plugin="Some Family -*"
+List<string> CustomTrustedPlugins(string[] a) => a
+    .Where(arg => arg.StartsWith("--trust-plugin=", StringComparison.OrdinalIgnoreCase))
+    .Select(arg => arg["--trust-plugin=".Length..].Trim('"'))
+    .Where(p => p.Length > 0)
+    .ToList();
 
 void WriteReport(List<string> lines, string outPath)
 {

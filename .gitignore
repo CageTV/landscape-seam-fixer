@@ -6,6 +6,8 @@ publish_multifile/
 *.csv
 smoke_out/
 *.log
+log.txt
+settings-used.json
 For Distribution/
 *.zip
 *.7z
