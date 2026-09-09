@@ -210,11 +210,6 @@ else has taken over the record.
   (MO2 profile parsing), `SeamDetector`, `SeamFixer`
 - `SeamFinder/` — console CLI
 - `SeamFinder.UI/` — WPF desktop app
-- `docs/DEVELOPMENT_HISTORY.md` — the fuller story of how this ended up as a
-  standalone Mutagen-based tool, including two earlier approaches that were
-  tried and abandoned (an xEdit/Pascal-Script prototype that reliably
-  crashed xEdit itself at scale, and a Synthesis-patcher integration whose
-  MO2 load-order resolution proved unreliable)
 
 ## Contributing
 
