@@ -174,12 +174,27 @@
                           ToolTip="Lowest priority of the three - only wins where neither CS Water Mod nor Water for ENB is ticked or has data for that record."/>
             </StackPanel>
             <Expander Header="Additional trusted plugins" Margin="0,0,0,6">
-                <StackPanel Margin="6,4,6,0">
-                    <TextBlock Text="One per line - an exact plugin filename, or a prefix ending in * to trust a whole patch family (e.g. &quot;My Landscape Mod -*&quot;). Treated the same as Landscape and Water Fixes/Lux Via: trusted for landscape restoration, resolved by load order alongside them - never above Northern Roads or UniqueLocationsRiverwoodForest.esp."
-                               Foreground="Gray" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
-                    <TextBox x:Name="CustomTrustedPluginsBox" AcceptsReturn="True" TextWrapping="NoWrap"
-                             VerticalScrollBarVisibility="Auto" Height="70" FontFamily="Consolas"/>
-                </StackPanel>
+                <Grid Margin="6,4,6,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="12"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0">
+                        <TextBlock Text="Trusted (loses to Northern Roads / URF)" FontWeight="Bold" FontSize="11" Margin="0,0,0,2"/>
+                        <TextBlock Text="One per line - an exact plugin filename, or a prefix ending in * to trust a whole patch family (e.g. &quot;My Landscape Mod -*&quot;). Treated the same as Landscape and Water Fixes/Lux Via: trusted for landscape restoration, resolved by load order alongside them - never above Northern Roads or UniqueLocationsRiverwoodForest.esp."
+                                   Foreground="Gray" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
+                        <TextBox x:Name="CustomTrustedPluginsBox" AcceptsReturn="True" TextWrapping="NoWrap"
+                                 VerticalScrollBarVisibility="Auto" Height="70" FontFamily="Consolas"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <TextBlock Text="Overrides Northern Roads / URF instead" FontWeight="Bold" FontSize="11" Margin="0,0,0,2"/>
+                        <TextBlock Text="Same syntax (one per line, exact name or a *-prefix). These WIN over Northern Roads/UniqueLocationsRiverwoodForest.esp wherever both genuinely edited the same cell - for a mod you want to override the two with, instead of the other way around."
+                                   Foreground="Gray" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,4"/>
+                        <TextBox x:Name="PriorityOverNorthernRoadsPluginsBox" AcceptsReturn="True" TextWrapping="NoWrap"
+                                 VerticalScrollBarVisibility="Auto" Height="70" FontFamily="Consolas"/>
+                    </StackPanel>
+                </Grid>
             </Expander>
             <StackPanel Orientation="Horizontal">
                 <Button x:Name="RunButton" Content="Run Detection" Padding="20,6" FontWeight="Bold" Click="RunButton_Click"/>

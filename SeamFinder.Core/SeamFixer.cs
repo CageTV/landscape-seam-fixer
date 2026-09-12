@@ -74,107 +74,9 @@ public static class SeamFixer
         }
         return -1;
     }
-    static readonly HashSet<string> BaseGamePlugins = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm",
-        "Unofficial Skyrim Special Edition Patch.esp", "Legacy of the Dragonborn.esm",
-        // Third-party Nexus mod (spaces in the name - distinct from this
-        // tool's own no-spaces output filename), built specifically as a
-        // companion to Landscape and Water Fixes: nexusmods.com/.../59687.
-        "Landscape Seam Fixes.esp",
-        // Falkreath-area landscape overhaul, built to work WITH Northern
-        // Roads (matches its road textures/area rather than fighting it) -
-        // trusted unconditionally, and given priority ABOVE Northern Roads
-        // itself in ResolveTrustedOnlyLandscape below, since it's the one
-        // mod the user has confirmed should win over Northern Roads rather
-        // than the other way around.
-        "UniqueLocationsRiverwoodForest.esp",
-        "Landscape and Water Fixes.esp",
-        "Lux Via.esp",
-    };
-
-    // Every entry above is trusted alongside its own compatibility-patch
-    // family too, not just standalone - most Nexus mods name patches
-    // "<Mod Name> - <what it patches>.esp" (LWF's LFfGM/GotT/Myrwatch/...
-    // patches, Lux Via's dozens of same-prefix patches, ...), so that
-    // convention is auto-derived from each trusted base name below rather
-    // than hardcoded per mod. A few mods use a totally unrelated prefix
-    // scheme instead and need an explicit entry here - confirmed by the
-    // user for Legacy of the Dragonborn specifically (its patches use
-    // "DBM_"/"DBM_CC_"/"LOTD_"/"LOTD_TCC_", nothing derivable from its own
-    // filename). Add future non-standard cases here as they turn up.
-    static readonly Dictionary<string, string[]> NonStandardPatchPrefixes = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["Legacy of the Dragonborn.esm"] = ["DBM_", "DBM_CC_", "LOTD_", "LOTD_TCC_"],
-    };
-
-    // True if `plugin` is a compatibility patch belonging to `baseName`'s
-    // family (NOT `baseName` itself) - either the common "<base> - ..."
-    // naming convention, or one of the non-standard prefix sets above.
-    static bool IsPatchOfTrustedBase(string plugin, string baseName)
-    {
-        if (plugin.Equals(baseName, StringComparison.OrdinalIgnoreCase)) return false;
-        var stem = Path.GetFileNameWithoutExtension(baseName);
-        if (plugin.StartsWith(stem + " -", StringComparison.OrdinalIgnoreCase)) return true;
-        if (NonStandardPatchPrefixes.TryGetValue(baseName, out var prefixes))
-            foreach (var prefix in prefixes)
-                if (plugin.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return true;
-        return false;
-    }
-
-    // True if `plugin` is `baseName` itself or a patch of it, for any
-    // trusted base name - the actual membership test IsBaseGamePlugin uses
-    // for the "ordinary" trusted pool (everything except Northern Roads,
-    // which is opt-in/ambiguous and handled separately below).
-    static bool IsTrustedBaseOrPatch(string plugin) =>
-        BaseGamePlugins.Any(b => plugin.Equals(b, StringComparison.OrdinalIgnoreCase) || IsPatchOfTrustedBase(plugin, b));
-
-    // User-supplied additions to the trusted list (the UI's "Additional
-    // trusted plugins" box) - each entry is either an exact plugin name, or
-    // a prefix ending in "*" to trust a whole patch family the same way
-    // the families above are matched. Kept as a plain ordered list rather
-    // than a HashSet since prefix entries need StartsWith, not just exact
-    // lookup; checked linearly, which is fine at the handful-of-entries
-    // scale a text box realistically holds.
-    static bool MatchesCustomTrust(string plugin, IReadOnlyList<string> customTrustedPlugins)
-    {
-        foreach (var pattern in customTrustedPlugins)
-        {
-            if (pattern.EndsWith('*'))
-            {
-                if (plugin.StartsWith(pattern[..^1], StringComparison.OrdinalIgnoreCase)) return true;
-            }
-            else if (plugin.Equals(pattern, StringComparison.OrdinalIgnoreCase)) return true;
-        }
-        return false;
-    }
-
-    // Northern Roads is opt-in, not in the always-on BaseGamePlugins set:
-    // its Nexus page ships two downloads that both install as a plugin
-    // literally named "Northern Roads.esp" - the full terrain-reshaping
-    // version and a clutter-only version - so the filename alone can't
-    // distinguish them. Trusting the wrong one would blend other mods
-    // toward a version that never actually reshaped this terrain. The
-    // caller states which one is actually installed. Its own compatibility-
-    // patch hub ("Northern Roads - <other mod> Patch.esp", e.g. "Northern
-    // Roads - Unique Locations Riverwood patch.esp") is trusted alongside
-    // it the same auto-derived way as everything else, and additionally
-    // given priority ABOVE both plain Northern Roads and whatever it's
-    // patching in ResolveTrustedOnlyLandscape below - a patch exists
-    // specifically to reconcile the two, so it's more authoritative than
-    // either alone wherever they actually overlap. Confirmed necessary in
-    // practice: without that priority, a cell the patch legitimately won
-    // (with its careful reconciliation) looked "untrusted" to this tool,
-    // which overwrote it with plain Northern Roads or plain
-    // UniqueLocationsRiverwoodForest.esp data, undoing the patch and
-    // producing holes/dips at the seam between the two mods.
-    static bool IsNorthernRoadsOrItsPatch(string plugin, bool trustNorthernRoads) =>
-        trustNorthernRoads && (plugin.Equals("Northern Roads.esp", StringComparison.OrdinalIgnoreCase) || IsPatchOfTrustedBase(plugin, "Northern Roads.esp"));
-
-    static bool IsBaseGamePlugin(string plugin, bool trustNorthernRoads, IReadOnlyList<string> customTrustedPlugins) =>
-        IsTrustedBaseOrPatch(plugin)
-        || MatchesCustomTrust(plugin, customTrustedPlugins)
-        || IsNorthernRoadsOrItsPatch(plugin, trustNorthernRoads);
+    // Trust/patch-detection logic (BaseGamePlugins, masters-based patch
+    // detection, custom trust, Northern Roads opt-in) now lives in
+    // TrustResolver.cs, shared with TextureLayerFixer - see that file.
 
     /// Generates a fix plugin from an already-resolved list of active plugin
     /// files (e.g. from Mo2Resolver), by materializing them into a single
@@ -187,7 +89,8 @@ public static class SeamFixer
         Action<string> log,
         bool trustNorthernRoads = false,
         WaterTrustOptions? waterTrust = null,
-        IReadOnlyList<string>? customTrustedPlugins = null)
+        IReadOnlyList<string>? customTrustedPlugins = null,
+        IReadOnlyList<string>? priorityOverNorthernRoadsPlugins = null)
     {
         var mergedFolder = Path.Combine(Path.GetTempPath(), "SeamFixerMerged-" + Guid.NewGuid().ToString("N"));
         log($"Staging {loadOrder.Count} plugin files into {mergedFolder} ...");
@@ -203,13 +106,30 @@ public static class SeamFixer
                 .Build();
 
             var priorityIndex = modKeys.Select((k, idx) => (k, idx)).ToDictionary(x => x.k, x => x.idx);
-            return GenerateFixPluginCore(env.LinkCache, priorityIndex, mergedFolder, outputPluginName, outputDirectory, log, trustNorthernRoads, waterTrust ?? WaterTrustOptions.None, customTrustedPlugins ?? []);
+            var mastersByPlugin = BuildMastersByPlugin(env.LoadOrder.ListedOrder);
+            return GenerateFixPluginCore(env.LinkCache, priorityIndex, mergedFolder, outputPluginName, outputDirectory, log, trustNorthernRoads, waterTrust ?? WaterTrustOptions.None, customTrustedPlugins ?? [], priorityOverNorthernRoadsPlugins ?? [], mastersByPlugin);
         }
         finally
         {
             try { Directory.Delete(mergedFolder, recursive: true); }
             catch (Exception ex) { log($"(could not clean up temp folder {mergedFolder}: {ex.Message})"); }
         }
+    }
+
+    // ESP masters, keyed by filename (not ModKey - matches how every other
+    // trust check in this file compares plugins) - the data-driven signal
+    // HasMasterRelationship uses instead of guessing prefixes.
+    static Dictionary<string, HashSet<string>> BuildMastersByPlugin(IEnumerable<Mutagen.Bethesda.Plugins.Order.IModListingGetter<ISkyrimModGetter>> listedOrder)
+    {
+        var result = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var listing in listedOrder)
+        {
+            if (listing.Mod is null) continue;
+            result[listing.ModKey.FileName] = listing.Mod.ModHeader.MasterReferences
+                .Select(m => m.Master.FileName.String)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        }
+        return result;
     }
 
     /// Generates a fix plugin against a plain Data folder (no mod-manager
@@ -223,7 +143,8 @@ public static class SeamFixer
         Action<string> log,
         bool trustNorthernRoads = false,
         WaterTrustOptions? waterTrust = null,
-        IReadOnlyList<string>? customTrustedPlugins = null)
+        IReadOnlyList<string>? customTrustedPlugins = null,
+        IReadOnlyList<string>? priorityOverNorthernRoadsPlugins = null)
     {
         using var env = GameEnvironmentBuilder<ISkyrimMod, ISkyrimModGetter>
             .Create(GameRelease.SkyrimSE)
@@ -234,7 +155,8 @@ public static class SeamFixer
             .Select((listing, idx) => (listing.ModKey, idx))
             .ToDictionary(x => x.ModKey, x => x.idx);
 
-        return GenerateFixPluginCore(env.LinkCache, priorityIndex, dataFolderPath, outputPluginName, outputDirectory, log, trustNorthernRoads, waterTrust ?? WaterTrustOptions.None, customTrustedPlugins ?? []);
+        var mastersByPlugin = BuildMastersByPlugin(env.LoadOrder.ListedOrder);
+        return GenerateFixPluginCore(env.LinkCache, priorityIndex, dataFolderPath, outputPluginName, outputDirectory, log, trustNorthernRoads, waterTrust ?? WaterTrustOptions.None, customTrustedPlugins ?? [], priorityOverNorthernRoadsPlugins ?? [], mastersByPlugin);
     }
 
     static SeamFixResult GenerateFixPluginCore(
@@ -246,8 +168,11 @@ public static class SeamFixer
         Action<string> log,
         bool trustNorthernRoads,
         WaterTrustOptions waterTrust,
-        IReadOnlyList<string> customTrustedPlugins)
+        IReadOnlyList<string> customTrustedPlugins,
+        IReadOnlyList<string> priorityOverNorthernRoadsPlugins,
+        Dictionary<string, HashSet<string>> mastersByPlugin)
     {
+        TrustResolver.SetMastersContext(mastersByPlugin, outputPluginName);
         var outputModKey = ModKey.FromNameAndExtension(outputPluginName);
         var patchMod = new SkyrimMod(outputModKey, SkyrimRelease.SkyrimSE);
 
@@ -268,12 +193,15 @@ public static class SeamFixer
             // needs to say which worldspace too.
             var wsName = wsContext.Record.EditorID ?? wsContext.Record.FormKey.ToString();
 
-            var (landscape, ownerModKey) = ResolveWinningLandscape(cell.FormKey, linkCache, priorityIndex);
+            var (landscape, ownerModKey) = HeightmapDecoder.ResolveWinningLandscape(cell.FormKey, linkCache, priorityIndex);
             if (landscape?.VertexHeightMap is null) continue;
 
             // The winning owner is already trusted - this IS the
-            // authoritative data, nothing to restore.
-            if (IsBaseGamePlugin(ownerModKey.FileName, trustNorthernRoads, customTrustedPlugins)) continue;
+            // authoritative data, nothing to restore. A priority-override
+            // plugin counts as trusted here too (it's just ranked ABOVE
+            // Northern Roads/URF instead of below, in ResolveTrustedOnlyLandscape).
+            if (TrustResolver.IsBaseGamePlugin(ownerModKey.FileName, trustNorthernRoads, customTrustedPlugins)
+                || TrustResolver.MatchesCustomTrust(ownerModKey.FileName, priorityOverNorthernRoadsPlugins)) continue;
 
             // Is there a trusted plugin's own repair for this exact cell
             // that the actual winner has silently discarded? "Discarded"
@@ -286,12 +214,12 @@ public static class SeamFixer
             // it. Either way, if the trusted plugin's data differs from
             // what's actually winning, that repair isn't visible in-game
             // right now.
-            var (trustedLandscape, trustedOwnerModKey) = ResolveTrustedOnlyLandscape(cell.FormKey, linkCache, priorityIndex, trustNorthernRoads, customTrustedPlugins);
+            var (trustedLandscape, trustedOwnerModKey) = ResolveTrustedOnlyLandscape(cell.FormKey, linkCache, priorityIndex, trustNorthernRoads, customTrustedPlugins, priorityOverNorthernRoadsPlugins);
             if (trustedLandscape?.VertexHeightMap is null) continue; // no trusted data exists for this cell at all - nothing to restore
 
-            var actualHeights = DecodeHeights(landscape.VertexHeightMap);
-            var trustedHeights = DecodeHeights(trustedLandscape.VertexHeightMap);
-            if (HeightsMatch(actualHeights, trustedHeights)) continue; // ITM - already matches the trusted repair, nothing to restore
+            var actualHeights = HeightmapDecoder.DecodeHeights(landscape.VertexHeightMap);
+            var trustedHeights = HeightmapDecoder.DecodeHeights(trustedLandscape.VertexHeightMap);
+            if (HeightmapDecoder.HeightsMatch(actualHeights, trustedHeights)) continue; // ITM - already matches the trusted repair, nothing to restore
 
             // Northern Roads reshapes terrain across the whole map, not as
             // an isolated patch like the rest of the trusted list - the
@@ -306,9 +234,27 @@ public static class SeamFixer
             // on, Northern Roads' own restorations skip both safety gates
             // below entirely - every OTHER trusted plugin still goes
             // through them unchanged.
+            // Same reasoning applies to UniqueLocationsRiverwoodForest.esp
+            // (and its own "UniqueLocationsRiverwood -" patch family, see
+            // NonStandardPatchPrefixes) as to Northern Roads: it's a
+            // full-map landscape overhaul ("adding new hills, waterfalls,
+            // ruins... drastically changing the landscape", per its own
+            // Nexus page), not a narrow occasional patch - a carved
+            // river/gorge cell is EXPECTED to sit below the water plane
+            // (that's the point of the carve), so the water-safety gate's
+            // "don't strand the water" caution is backwards here: leaving
+            // vanilla's dry, above-water terrain in place is the actual bug.
+            // Confirmed in practice: cell (1,-13) has vanilla terrain 656
+            // units ABOVE this mod's carved floor at the vertex the player
+            // was standing on, well past the water plane either way -
+            // exactly the "solid ground where there should be a submerged
+            // gorge" symptom this whole investigation started from.
             string trustedOwnerFileName = trustedOwnerModKey.FileName;
-            var isNorthernRoads = trustedOwnerFileName.Equals("Northern Roads.esp", StringComparison.OrdinalIgnoreCase)
-                || (trustNorthernRoads && trustedOwnerFileName.StartsWith("Northern Roads -", StringComparison.OrdinalIgnoreCase));
+            var isFullLandscapeOverhaul = trustedOwnerFileName.Equals("Northern Roads.esp", StringComparison.OrdinalIgnoreCase)
+                || (trustNorthernRoads && trustedOwnerFileName.StartsWith("Northern Roads -", StringComparison.OrdinalIgnoreCase))
+                || trustedOwnerFileName.Equals("UniqueLocationsRiverwoodForest.esp", StringComparison.OrdinalIgnoreCase)
+                || TrustResolver.IsPatchOfTrustedBase(trustedOwnerFileName, "UniqueLocationsRiverwoodForest.esp");
+            var isNorthernRoads = isFullLandscapeOverhaul;
 
             // Water safety: this tool never touches Cell.Water/WaterHeight.
             // A cell with its own water plane may have that water
@@ -365,13 +311,86 @@ public static class SeamFixer
             foreach (var t in context.Record.Temporary) writableCell.Temporary.Add((IPlaced)t.DeepCopy());
             writableCell.Landscape = trustedLandscape.DeepCopy();
 
-            var (maxDiff, atX, atY) = MaxHeightDiff(actualHeights, trustedHeights);
-            var bypassNote = isNorthernRoads && (hasWater || worstReferenceMove > 20f)
-                ? $" [Northern Roads bypass: {(hasWater ? "has its own water plane" : $"would move a reference by {worstReferenceMove:F0} units")}, restored anyway]"
+            var (maxDiff, atX, atY) = HeightmapDecoder.MaxHeightDiff(actualHeights, trustedHeights);
+            var bypassNote = isFullLandscapeOverhaul && (hasWater || worstReferenceMove > 20f)
+                ? $" [full-overhaul bypass: {(hasWater ? "has its own water plane" : $"would move a reference by {worstReferenceMove:F0} units")}, restored anyway]"
                 : "";
             log($"  Restored [{wsName}] ({cell.Grid.Point.X},{cell.Grid.Point.Y}): {ownerModKey.FileName} had overwritten {trustedOwnerModKey.FileName}'s terrain by up to {maxDiff:F0} units (worst at vertex ({atX},{atY})){bypassNote}");
             cellsPatched++;
         }
+
+        // Genuine trusted water pass: independent of (and runs BEFORE) the
+        // CS Water Mod/Water for ENB/RealisticWaterTwo priority system
+        // below - that system answers "which of these 3 specific overhaul
+        // mods should win when they compete," this answers a DIFFERENT
+        // question: "did some legitimate water-adding mod's real water get
+        // silently lost by a LATER, unrelated override that didn't
+        // preserve it?" Confirmed as a real need 2026-09-11: Half Moon
+        // Creek.esp genuinely added water to a cell (a real WaterHeight and
+        // Water-type link, differing from vanilla), and a LATER-loading,
+        // completely unrelated compatibility patch's own generated
+        // override reset it back to vanilla's blank state (that patch
+        // itself carries the exact same "an override that doesn't
+        // explicitly copy a field loses it" bug this toolkit's own
+        // RoadMaskMerger was just fixed for - see its NOTES.md). Neither
+        // Half Moon Creek nor its Northern Roads patch was ever a
+        // configured "water mod" in the 3-mod system below, so nothing
+        // caught this - the height-restoration trust pool is what SHOULD
+        // have had an equivalent for water all along, and now does.
+        //
+        // Uses the SAME general trust pool height restoration already uses
+        // (TrustResolver.IsBaseGamePlugin: game masters, USSEP, LWF family,
+        // URF, Northern Roads/its patch family if opted in, custom-trusted
+        // plugins) - "Northern Roads - Half Moon Creek patch.esp" already
+        // qualifies via the "Northern Roads -" patch-family prefix, no new
+        // trust-list entry needed. Same genuine-edit gate as height (must
+        // actually differ from vanilla, not just an inert ITM copy) so an
+        // incidentally-touching trusted plugin with no real water opinion
+        // here can't silently override a legitimate, deliberate design.
+        // Always runs (not gated by waterTrust.Any - this answers a
+        // different question than the specific-3-mod system) and runs
+        // FIRST so that system, when the user has enabled it, still gets
+        // final say over any cell it also has an opinion on.
+        int cellsGenuineWaterRestored = 0;
+        foreach (var context in linkCache.WinningContextOverrides<Cell, ICellGetter>(linkCache))
+        {
+            var cell = context.Record;
+            if (cell.Grid is null) continue;
+
+            var genuineWater = ResolveGenuineTrustedWaterForCell(cell.FormKey, linkCache, priorityIndex, trustNorthernRoads, customTrustedPlugins);
+            if (genuineWater is null) continue;
+            if (context.ModKey.Equals(genuineWater.Value.OwnerModKey)) continue; // trusted source already wins this cell outright
+
+            // Only actually restore if the CURRENT winner's water really
+            // differs from what the trusted source has - avoids a no-op
+            // override for a cell that happens to already match.
+            var currentHasLink = cell.Water.FormKeyNullable.HasValue;
+            var matches = currentHasLink == genuineWater.Value.HasWaterLink
+                && cell.WaterHeight == genuineWater.Value.WaterHeight
+                && cell.Water.FormKeyNullable == genuineWater.Value.Water?.FormKeyNullable;
+            if (matches) continue;
+
+            if (!context.TryGetParentSimpleContext<IWorldspaceGetter>(out var wsContext)) continue;
+            var wsName = wsContext.Record.EditorID ?? wsContext.Record.FormKey.ToString();
+
+            var writableCell = context.GetOrAddAsOverride(patchMod);
+            if (writableCell.Persistent.Count == 0 && writableCell.Temporary.Count == 0 && context.Record.Persistent.Count + context.Record.Temporary.Count > 0)
+            {
+                // Same reasoning as the existing water pass below - a brand
+                // new override needs its object lists carried forward too.
+                foreach (var p in context.Record.Persistent) writableCell.Persistent.Add((IPlaced)p.DeepCopy());
+                foreach (var t in context.Record.Temporary) writableCell.Temporary.Add((IPlaced)t.DeepCopy());
+            }
+
+            if (genuineWater.Value.HasWaterFlag) writableCell.Flags |= Cell.Flag.HasWater;
+            if (genuineWater.Value.HasWaterLink) writableCell.Water = genuineWater.Value.Water!.AsSetter().AsNullable();
+            writableCell.WaterHeight = genuineWater.Value.WaterHeight;
+
+            log($"  Restored genuine water [{wsName}] ({cell.Grid.Point.X},{cell.Grid.Point.Y}): {context.ModKey.FileName} had lost {genuineWater.Value.OwnerModKey.FileName}'s water data");
+            cellsGenuineWaterRestored++;
+        }
+        if (cellsGenuineWaterRestored > 0)
+            log($"Restored genuinely-trusted water in {cellsGenuineWaterRestored} cell(s) (independent of the CS Water Mod/Water for ENB/RealisticWaterTwo system below).");
 
         // Water pass: completely separate from everything above - never
         // reads or writes Landscape, only Cell.Water/WaterHeight/Flags and
@@ -454,37 +473,13 @@ public static class SeamFixer
         return new SeamFixResult(cellsPatched, cellsPatched, outputPath, 0f, verificationWarnings);
     }
 
-    // Resolves the winning Landscape sub-record for a cell. Note this can be
-    // owned by a DIFFERENT plugin than the one that wins the Cell overall -
-    // a later plugin can win the Cell (e.g. by adding an NPC) without ever
-    // redeclaring Landscape, leaving an earlier plugin's Landscape as the
-    // one actually in effect. That's exactly why the write path (see
-    // WriteCorrectedCell) targets the outer, TRUE winning Cell context, and
-    // only uses this function's result as the source data to deep-copy and
-    // correct - never as the context to write into.
-    static (ILandscapeGetter? Landscape, ModKey OwnerModKey) ResolveWinningLandscape(
-        FormKey cellFormKey,
-        ILinkCache<ISkyrimMod, ISkyrimModGetter> linkCache,
-        Dictionary<ModKey, int> priorityIndex)
-    {
-        ILandscapeGetter? best = null;
-        ModKey bestModKey = default;
-        int bestIndex = -1;
-
-        foreach (var ctx in linkCache.ResolveAllContexts<Cell, ICellGetter>(cellFormKey, ResolveTarget.Winner))
-        {
-            if (ctx.Record.Landscape is null) continue;
-            var idx = priorityIndex.GetValueOrDefault(ctx.ModKey, -1);
-            if (idx > bestIndex)
-            {
-                bestIndex = idx;
-                best = ctx.Record.Landscape;
-                bestModKey = ctx.ModKey;
-            }
-        }
-
-        return (best, bestModKey);
-    }
+    // ResolveWinningLandscape now lives in HeightmapDecoder.cs, shared with
+    // TextureLayerFixer.cs (note: it can resolve to a DIFFERENT plugin than
+    // the one that wins the Cell overall - a later plugin can win the Cell,
+    // e.g. by adding an NPC, without ever redeclaring Landscape. That's
+    // exactly why the write path below targets the outer, TRUE winning Cell
+    // context, and only uses this function's result as source data to
+    // deep-copy and correct - never as the context to write into).
 
     // Same walk as ResolveWinningLandscape, but restricted to contexts whose
     // owning plugin is itself trusted/base-equivalent - i.e. "what would this
@@ -499,7 +494,8 @@ public static class SeamFixer
         ILinkCache<ISkyrimMod, ISkyrimModGetter> linkCache,
         Dictionary<ModKey, int> priorityIndex,
         bool trustNorthernRoads,
-        IReadOnlyList<string> customTrustedPlugins)
+        IReadOnlyList<string> customTrustedPlugins,
+        IReadOnlyList<string> priorityOverNorthernRoadsPlugins)
     {
         ILandscapeGetter? best = null;
         ModKey bestModKey = default;
@@ -511,13 +507,37 @@ public static class SeamFixer
         ILandscapeGetter? northernRoadsPatch = null;
         ModKey northernRoadsPatchModKey = default;
         int northernRoadsPatchIndex = -1;
+        // User-designated plugins that should win over BOTH Northern Roads
+        // and UniqueLocationsRiverwoodForest.esp wherever they genuinely
+        // conflict - the "other side" of the Additional Trusted Plugins box
+        // (see the UI's two boxes / NOTES.md). Ranked among themselves by
+        // ordinary load order (highest idx wins) same as the "best" pool
+        // below, since the user gave no other ordering signal for this set.
+        ILandscapeGetter? priorityOverride = null;
+        ModKey priorityOverrideModKey = default;
+        int priorityOverrideIndex = -1;
+        // Vanilla's own copy, captured so the unconditional URF/Northern-Roads
+        // priority below can tell a REAL edit apart from Creation Kit's inert
+        // ITM carry-forward - see IsGenuineEdit.
+        ILandscapeGetter? vanilla = null;
 
         foreach (var ctx in linkCache.ResolveAllContexts<Cell, ICellGetter>(cellFormKey, ResolveTarget.Winner))
         {
             if (ctx.Record.Landscape is null) continue;
-            if (!IsBaseGamePlugin(ctx.ModKey.FileName, trustNorthernRoads, customTrustedPlugins)) continue;
             string fileName = ctx.ModKey.FileName;
+            bool isPriorityOverride = TrustResolver.MatchesCustomTrust(fileName, priorityOverNorthernRoadsPlugins);
+            if (!TrustResolver.IsBaseGamePlugin(fileName, trustNorthernRoads, customTrustedPlugins) && !isPriorityOverride) continue;
             var idx = priorityIndex.GetValueOrDefault(ctx.ModKey, -1);
+            if (fileName.Equals("Skyrim.esm", StringComparison.OrdinalIgnoreCase))
+            {
+                vanilla = ctx.Record.Landscape;
+            }
+            if (isPriorityOverride && idx > priorityOverrideIndex)
+            {
+                priorityOverrideIndex = idx;
+                priorityOverride = ctx.Record.Landscape;
+                priorityOverrideModKey = ctx.ModKey;
+            }
             if (trustNorthernRoads && fileName.Equals("Northern Roads.esp", StringComparison.OrdinalIgnoreCase))
             {
                 northernRoads = ctx.Record.Landscape;
@@ -528,7 +548,7 @@ public static class SeamFixer
                 riverwoodForest = ctx.Record.Landscape;
                 riverwoodForestModKey = ctx.ModKey;
             }
-            if (trustNorthernRoads && IsPatchOfTrustedBase(fileName, "Northern Roads.esp") && idx > northernRoadsPatchIndex)
+            if (trustNorthernRoads && TrustResolver.IsPatchOfTrustedBase(fileName, "Northern Roads.esp") && idx > northernRoadsPatchIndex)
             {
                 northernRoadsPatchIndex = idx;
                 northernRoadsPatch = ctx.Record.Landscape;
@@ -542,8 +562,8 @@ public static class SeamFixer
             // or no family at all) still fall back to ordinary load-order
             // priority against each other.
             if (best is null
-                || IsPatchOfTrustedBase(fileName, bestModKey.FileName)
-                || (!IsPatchOfTrustedBase(bestModKey.FileName, fileName) && idx > bestIndex))
+                || TrustResolver.IsPatchOfTrustedBase(fileName, bestModKey.FileName)
+                || (!TrustResolver.IsPatchOfTrustedBase(bestModKey.FileName, fileName) && idx > bestIndex))
             {
                 bestIndex = idx;
                 best = ctx.Record.Landscape;
@@ -551,6 +571,17 @@ public static class SeamFixer
             }
         }
 
+        // 2026-09-11 addition: BEFORE any of the tiers below, a user-listed
+        // priority-override plugin (the UI's second trust box) wins over
+        // ALL of them - Northern Roads' own patch family included - the
+        // same "unconditional regardless of load order" way Northern Roads/
+        // URF win over the ordinary trusted pool. This is the mirror image
+        // of that same problem one level up: without it, there was no way
+        // for the user to say "I want THIS mod's edit to be the one that
+        // sticks, even where it conflicts with Northern Roads/URF" - every
+        // custom-trusted plugin was permanently capped below both. See the
+        // priorityOverride check right after IsGenuineEdit below.
+        //
         // Northern Roads wins the trusted-only baseline whenever it has any
         // override for this cell at all, regardless of load order - the
         // ordinary "highest load-order index among the trusted set" rule
@@ -581,11 +612,123 @@ public static class SeamFixer
         // won got silently overwritten with plain URF or plain Northern
         // Roads data, undoing the patch's reconciliation and producing
         // holes/dips right at the seam between the two mods.
-        if (northernRoadsPatch is not null) return (northernRoadsPatch, northernRoadsPatchModKey);
-        if (riverwoodForest is not null) return (riverwoodForest, riverwoodForestModKey);
-        if (northernRoads is not null) return (northernRoads, northernRoadsModKey);
+        //
+        // Second bug fixed here: the patch tier was originally exempt from
+        // the genuine-edit check on the theory that "a compat patch
+        // deliberately matching vanilla is still an authoritative decision."
+        // That's true for a patch that actually RECONCILES the two mods in
+        // dispute here - but "Northern Roads -" only tells us the patch's
+        // OTHER side is Northern Roads, not that its other side is whatever
+        // is actually being restored (URF, in this case). A patch for a
+        // totally unrelated conflict (confirmed in practice: "Northern
+        // Roads - Skyrim Wayshrines patch.esp" touching a cell it has
+        // nothing to say about, carrying vanilla-identical data there
+        // purely incidentally) would otherwise unconditionally bury a real
+        // URF carve underneath its own irrelevant ITM copy. So this tier
+        // now requires the SAME genuine-edit test as plain URF/Northern
+        // Roads below - a patch that actually reconciles something still
+        // passes it (its whole purpose is to differ from at least one
+        // side), and an incidental, uninvolved patch now correctly falls
+        // through instead of masking the real trusted edit.
+        bool IsGenuineEdit(ILandscapeGetter? candidate) =>
+            candidate?.VertexHeightMap is not null && vanilla?.VertexHeightMap is not null
+            && !HeightmapDecoder.HeightsMatch(HeightmapDecoder.DecodeHeights(candidate.VertexHeightMap), HeightmapDecoder.DecodeHeights(vanilla.VertexHeightMap));
+
+        // Highest tier of all: a user-designated priority-override plugin
+        // wins unconditionally over Northern Roads/URF/the NR patch family
+        // below, wherever it genuinely edited this cell itself - checked
+        // BEFORE every other tier, on purpose. Same IsGenuineEdit gate as
+        // the rest: an override plugin that merely carries an inert ITM
+        // copy of vanilla forward here still shouldn't get to silently bury
+        // a real Northern Roads/URF edit just for being in this list.
+        if (priorityOverride is not null && IsGenuineEdit(priorityOverride)) return (priorityOverride, priorityOverrideModKey);
+
+        if (northernRoadsPatch is not null && IsGenuineEdit(northernRoadsPatch)) return (northernRoadsPatch, northernRoadsPatchModKey);
+
+        // Plain URF/Northern Roads only get this unconditional priority when
+        // they actually EDITED this cell - not when they're merely carrying
+        // an unedited ITM copy of vanilla forward (which Creation Kit does
+        // constantly for any cell a mod touches for an unrelated reason,
+        // e.g. placing an NPC). Bug fixed here: this used to fire on ANY
+        // entry at all, so an inert URF/Northern Roads ITM could silently
+        // outrank - and bury - a REAL edit from another trusted mod (LWF,
+        // the real "Landscape Seam Fixes.esp", etc.) that "best" above would
+        // otherwise have correctly picked, on any cell URF/Northern Roads
+        // never actually touched. Same IsGenuineEdit test as the patch tier
+        // above.
+        if (riverwoodForest is not null && IsGenuineEdit(riverwoodForest)) return (riverwoodForest, riverwoodForestModKey);
+        if (northernRoads is not null && IsGenuineEdit(northernRoads)) return (northernRoads, northernRoadsModKey);
 
         return (best, bestModKey);
+    }
+
+    // The general-trust counterpart to ResolveTrustedOnlyLandscape, for
+    // water instead of height - see the "Genuine trusted water pass"
+    // comment at its call site for the full reasoning. Walks every context
+    // for this cell, finds vanilla's own water baseline plus the highest-
+    // priority TRUSTED (TrustResolver.IsBaseGamePlugin) plugin whose water
+    // genuinely differs from vanilla, and returns that as the restoration
+    // source - or null if no trusted plugin has a genuine water edit here
+    // at all.
+    static (bool HasWaterFlag, bool HasWaterLink, IFormLinkNullableGetter<IWaterGetter>? Water, float? WaterHeight, ModKey OwnerModKey)? ResolveGenuineTrustedWaterForCell(
+        FormKey cellFormKey,
+        ILinkCache<ISkyrimMod, ISkyrimModGetter> linkCache,
+        Dictionary<ModKey, int> priorityIndex,
+        bool trustNorthernRoads,
+        IReadOnlyList<string> customTrustedPlugins)
+    {
+        var vanilla = ((bool HasWaterFlag, bool HasWaterLink, IFormLinkNullableGetter<IWaterGetter>? Water, float? WaterHeight, ModKey OwnerModKey)?)null;
+        var trustedCandidates = new List<(bool HasWaterFlag, bool HasWaterLink, IFormLinkNullableGetter<IWaterGetter>? Water, float? WaterHeight, ModKey OwnerModKey, int Index)>();
+
+        // Pass 1: collect vanilla's own baseline plus every TRUSTED
+        // candidate with any water data at all - genuineness can only be
+        // judged once vanilla is known, which isn't guaranteed to appear
+        // before a trusted candidate in iteration order.
+        foreach (var ctx in linkCache.ResolveAllContexts<Cell, ICellGetter>(cellFormKey, ResolveTarget.Winner))
+        {
+            var hasFlag = ctx.Record.Flags.HasFlag(Cell.Flag.HasWater);
+            var hasLink = ctx.Record.Water.FormKeyNullable.HasValue;
+            var waterHeight = ctx.Record.WaterHeight;
+            if (!hasFlag && !hasLink && !waterHeight.HasValue) continue; // nothing water-related here at all
+
+            string fileName = ctx.ModKey.FileName;
+            var entry = (hasFlag, hasLink, (IFormLinkNullableGetter<IWaterGetter>?)ctx.Record.Water, waterHeight, ctx.ModKey);
+
+            if (fileName.Equals("Skyrim.esm", StringComparison.OrdinalIgnoreCase))
+                vanilla = entry;
+
+            if (!TrustResolver.IsBaseGamePlugin(fileName, trustNorthernRoads, customTrustedPlugins)) continue;
+            var idx = priorityIndex.GetValueOrDefault(ctx.ModKey, -1);
+            trustedCandidates.Add((entry.hasFlag, entry.hasLink, entry.Item3, entry.waterHeight, entry.ModKey, idx));
+        }
+
+        if (vanilla is null || trustedCandidates.Count == 0) return null;
+
+        // Pass 2: among the TRUSTED candidates, pick the highest-priority
+        // one that GENUINELY differs from vanilla - checked DURING
+        // selection, not after picking "whichever trusted plugin loads
+        // latest" and hoping it happens to be genuine. Confirmed as a real
+        // bug in an earlier version of this method 2026-09-11: a later-
+        // loading trusted plugin ("Northern Roads - Rocks Patch.esp") with
+        // no real water opinion here (an inert ITM copy of vanilla) was
+        // being picked purely for loading later, silently hiding an
+        // EARLIER-loading trusted plugin's ("Northern Roads - Half Moon
+        // Creek patch.esp") genuine water a few positions before it in
+        // load order - exactly the case this whole pass exists to catch.
+        (bool HasWaterFlag, bool HasWaterLink, IFormLinkNullableGetter<IWaterGetter>? Water, float? WaterHeight, ModKey OwnerModKey)? best = null;
+        int bestIndex = -1;
+        foreach (var c in trustedCandidates)
+        {
+            if (c.Index <= bestIndex) continue;
+            bool differsFromVanilla = c.HasWaterLink != vanilla.Value.HasWaterLink
+                || c.WaterHeight != vanilla.Value.WaterHeight
+                || c.Water?.FormKeyNullable != vanilla.Value.Water?.FormKeyNullable;
+            if (!differsFromVanilla) continue;
+            bestIndex = c.Index;
+            best = (c.HasWaterFlag, c.HasWaterLink, c.Water, c.WaterHeight, c.OwnerModKey);
+        }
+
+        return best;
     }
 
     // Finds the highest-priority enabled water mod (see WaterFamilyRank)
@@ -662,59 +805,6 @@ public static class SeamFixer
         return best;
     }
 
-    // True if every one of the 1089 vertices matches within a tiny epsilon -
-    // "tiny" rather than exact-zero purely as float-safety margin, since both
-    // sides were decoded through the same delta-step math and a genuinely
-    // unedited/ITM copy reproduces the exact same bytes, not just similar
-    // values. Real edits are never this close by accident - the smallest
-    // legitimate correction this tool itself makes is many units, and hand
-    // authored terrain edits are larger still.
-    static bool HeightsMatch(float[,] a, float[,] b)
-    {
-        for (int y = 0; y <= 32; y++)
-        for (int x = 0; x <= 32; x++)
-            if (Math.Abs(a[x, y] - b[x, y]) > 0.5f) return false;
-        return true;
-    }
-
-    // Diagnostic companion to HeightsMatch - finds the single worst-mismatched
-    // vertex and where it is, so a failed ITM check can be understood instead
-    // of just trusted as a bare "not identical" verdict.
-    static (float MaxDiff, int X, int Y) MaxHeightDiff(float[,] a, float[,] b)
-    {
-        float maxDiff = 0f;
-        int atX = -1, atY = -1;
-        for (int y = 0; y <= 32; y++)
-        for (int x = 0; x <= 32; x++)
-        {
-            var d = Math.Abs(a[x, y] - b[x, y]);
-            if (d > maxDiff) { maxDiff = d; atX = x; atY = y; }
-        }
-        return (maxDiff, atX, atY);
-    }
-
-    static float[,] DecodeHeights(ILandscapeVertexHeightMapGetter vhgt)
-    {
-        var heights = new float[33, 33];
-        var map = vhgt.HeightMap;
-        for (int y = 0; y <= 32; y++)
-        {
-            for (int x = 0; x <= 32; x++)
-            {
-                sbyte delta = map[x, y];
-                if (x == 0)
-                {
-                    heights[0, y] = y == 0
-                        ? vhgt.Offset + delta * 8f
-                        : heights[0, y - 1] + delta * 8f;
-                }
-                else
-                {
-                    heights[x, y] = heights[x - 1, y] + delta * 8f;
-                }
-            }
-        }
-        return heights;
-    }
-
+    // VHGT decode/compare logic now lives in HeightmapDecoder.cs, shared
+    // with SeamDetector.cs (was duplicated identically in both before).
 }

@@ -1,5 +1,7 @@
 # Landscape Seam Fixer
 
+**Current version: 2.1.0** — see [CHANGELOG.md](CHANGELOG.md) for what's new.
+
 A standalone tool for Skyrim Special Edition / Anniversary Edition that fixes
 **landscape seams** — the cracks, cliffs, holes, and broken roads that appear
 where a mod's terrain edit gets silently overwritten by another plugin
@@ -47,17 +49,28 @@ below).
   mod that reshapes the entire road network, not just an occasional patch.
 - **Water mods** (separate from landscape entirely) — CS Water Mod, Water
   for ENB, RealisticWaterTwo, in that priority order. Restores only
-  `Water`/`WaterHeight`/water flags, never terrain.
+  `Water`/`WaterHeight`/water flags, never terrain. Independent of this,
+  the tool *always* restores water from any trusted plugin (the same trust
+  pool as landscape) whose water genuinely differs from vanilla, whenever a
+  later, unrelated override has silently lost it — no toggle needed.
 - **Your own additional trusted plugins** — a text box for anything not on
-  the list above (exact name, or `Name -*` for a whole patch family).
+  the list above (exact name, or `Name -*` for a whole patch family). A
+  second box lets you list plugins that should instead **win over** Northern
+  Roads/UniqueLocationsRiverwoodForest, for a mod whose edit should take
+  final priority over both.
 
-**Patch detection is automatic.** Most Nexus mods name their compatibility
-patches `<Mod Name> - <what it patches>.esp` — any trusted mod's patches
-following that convention are trusted (and outrank their own base mod)
-without needing a separate entry. A few mods use a different convention;
-Legacy of the Dragonborn's `DBM_`/`DBM_CC_`/`LOTD_`/`LOTD_TCC_` prefixes are
-special-cased for exactly this reason. Open an issue if you find another
-mod like this and it'll get added.
+**Recognizes sibling-tool output.** Road Mask Merger's, Landscape Texture
+Fixer's, and Floating Object Fixer's generated plugins are treated as
+trusted automatically, so this tool won't undo their work regardless of
+which order you run them in.
+
+**Patch detection is masters-based.** A plugin counts as a trusted mod's
+patch if that mod is one of its literal ESP masters *and* the patch has at
+least one genuine (vanilla-differing) landscape edit of its own — not
+filename guessing. A few mods with non-standard patch-naming conventions
+(e.g. Legacy of the Dragonborn's `DBM_`/`DBM_CC_`/`LOTD_`/`LOTD_TCC_`
+prefixes) are still special-cased on top of that. Open an issue if you find
+another mod like this and it'll get added.
 
 **Settings are remembered.** Every path, checkbox, and custom trusted entry
 is saved automatically after each run and restored next time you open the
@@ -84,8 +97,8 @@ app - no need to re-enter your setup every session.
 ## Building from source
 
 ```
-git clone https://github.com/CageTV/landscape-seam-fixer.git
-cd LandscapeSeamFix
+git clone <this repo's URL>
+cd "Landscape Seam Fixer"
 ```
 
 Build everything:
@@ -204,12 +217,23 @@ way but for `Cell.Water`/`WaterHeight`/`Flags.HasWater` and
 computed, just the trusted mod's own value forwarded whenever something
 else has taken over the record.
 
+**Patch detection** (used by both this tool and its sibling, Landscape
+Texture Fixer) recognizes a plugin as a trusted mod's patch when that mod is
+a literal ESP master of it *and* the patch has at least one genuine,
+vanilla-differing edit of its own — not by guessing filename prefixes.
+
 ## Project layout
 
-- `SeamFinder.Core/` — shared library: VHGT decode, `Mo2Resolver`
-  (MO2 profile parsing), `SeamDetector`, `SeamFixer`
+- `SeamFinder.Core/` — shared library: VHGT decode/trust-detection logic
+  this tool needs (`Mo2Resolver`, `TrustResolver`, `HeightmapDecoder`,
+  `SeamDetector`, `SeamFixer`)
 - `SeamFinder/` — console CLI
 - `SeamFinder.UI/` — WPF desktop app
+
+`SeamFinder.Core` here is a trimmed copy shared with two sibling tools
+(Landscape Texture Fixer, Floating Object Fixer) that live in their own
+separate repos — each repo only carries the subset of `SeamFinder.Core`
+it actually uses.
 
 ## Contributing
 
@@ -224,4 +248,6 @@ Issues and PRs welcome, especially:
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+CC BY-NC-SA 4.0 — see [LICENSE](LICENSE). Free to use, modify, and share
+(with attribution and under the same license), but not for commercial
+purposes — no selling this tool or a modified version of it.

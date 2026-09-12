@@ -134,7 +134,7 @@ public static class SeamDetector
             if (landscapeWinnerIndex > cellWinnerIndex)
                 orderingMismatchWarnings++;
 
-            var heights = DecodeHeights(landscape.VertexHeightMap);
+            var heights = HeightmapDecoder.DecodeHeights(landscape.VertexHeightMap);
 
             // See SeamFixer.CellData.IsCorrectable for the full reasoning:
             // gated on matching PURE VANILLA (Skyrim.esm/Update.esm/DLCs),
@@ -151,8 +151,8 @@ public static class SeamDetector
                 var (vanillaLandscape, _) = ResolvePureVanillaLandscape(cell.FormKey, linkCache, priorityIndex);
                 if (vanillaLandscape?.VertexHeightMap is not null)
                 {
-                    var vanillaHeights = DecodeHeights(vanillaLandscape.VertexHeightMap);
-                    isCorrectable = HeightsMatch(heights, vanillaHeights);
+                    var vanillaHeights = HeightmapDecoder.DecodeHeights(vanillaLandscape.VertexHeightMap);
+                    isCorrectable = HeightmapDecoder.HeightsMatch(heights, vanillaHeights);
                 }
             }
 
@@ -276,38 +276,8 @@ public static class SeamDetector
         return (best, bestModKey);
     }
 
-    // Kept in sync with SeamFixer.HeightsMatch.
-    static bool HeightsMatch(float[,] a, float[,] b)
-    {
-        for (int y = 0; y <= 32; y++)
-        for (int x = 0; x <= 32; x++)
-            if (Math.Abs(a[x, y] - b[x, y]) > 0.5f) return false;
-        return true;
-    }
-
-    static float[,] DecodeHeights(ILandscapeVertexHeightMapGetter vhgt)
-    {
-        var heights = new float[33, 33];
-        var map = vhgt.HeightMap;
-        for (int y = 0; y <= 32; y++)
-        {
-            for (int x = 0; x <= 32; x++)
-            {
-                sbyte delta = map[x, y];
-                if (x == 0)
-                {
-                    heights[0, y] = y == 0
-                        ? vhgt.Offset + delta * 8f
-                        : heights[0, y - 1] + delta * 8f;
-                }
-                else
-                {
-                    heights[x, y] = heights[x - 1, y] + delta * 8f;
-                }
-            }
-        }
-        return heights;
-    }
+    // VHGT decode/compare logic now lives in HeightmapDecoder.cs, shared
+    // with SeamFixer.cs (was duplicated identically in both before).
 
     // Trusted plugins - not just official base-game masters, also community
     // fix mods (USSEP, Legacy of the Dragonborn, Landscape Seam Fixes.esp)

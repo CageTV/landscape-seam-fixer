@@ -122,6 +122,8 @@ void RunFixMode(string[] fixArgs)
         Console.WriteLine("Usage: SeamFinder.exe --fix <instancePath> <profileName> [gameDataPath] [--trust-northern-roads]");
         Console.WriteLine("  Generates LandscapeSeamFixes.esp fixing isolated mod-vs-base-game seams only.");
         Console.WriteLine("  gameDataPath is optional - if omitted, reads gamePath from <instancePath>\\ModOrganizer.ini");
+        Console.WriteLine("  --trust-plugin=\"X.esp\" (repeatable) trusts a plugin, ranked BELOW Northern Roads/URF as always.");
+        Console.WriteLine("  --priority-plugin=\"X.esp\" (repeatable) trusts a plugin that WINS over Northern Roads/URF instead.");
         return;
     }
     var instancePath = fixArgs[1];
@@ -144,7 +146,7 @@ void RunFixMode(string[] fixArgs)
         }
 
         var fixResult = SeamFixer.GenerateFixPluginForResolvedPlugins(
-            resolved.LoadOrder, "LandscapeSeamFixes.esp", AppContext.BaseDirectory, Console.WriteLine, TrustNorthernRoads(fixArgs), WaterTrust(fixArgs), CustomTrustedPlugins(fixArgs));
+            resolved.LoadOrder, "LandscapeSeamFixes.esp", AppContext.BaseDirectory, Console.WriteLine, TrustNorthernRoads(fixArgs), WaterTrust(fixArgs), CustomTrustedPlugins(fixArgs), PriorityOverNorthernRoadsPlugins(fixArgs));
         Console.WriteLine();
         Console.WriteLine($"Restored {fixResult.CellsPatched} cell(s) to their trusted plugin's terrain.");
         Console.WriteLine($"Output: {fixResult.OutputPath}");
@@ -169,6 +171,16 @@ WaterTrustOptions WaterTrust(string[] a) => new(
 List<string> CustomTrustedPlugins(string[] a) => a
     .Where(arg => arg.StartsWith("--trust-plugin=", StringComparison.OrdinalIgnoreCase))
     .Select(arg => arg["--trust-plugin=".Length..].Trim('"'))
+    .Where(p => p.Length > 0)
+    .ToList();
+
+// Repeatable, same matching rules as --trust-plugin= (exact name or a "*"
+// prefix), but these plugins win over Northern Roads/UniqueLocationsRiverwoodForest.esp
+// wherever both genuinely edited the same cell, instead of always losing to
+// them like --trust-plugin= entries do.
+List<string> PriorityOverNorthernRoadsPlugins(string[] a) => a
+    .Where(arg => arg.StartsWith("--priority-plugin=", StringComparison.OrdinalIgnoreCase))
+    .Select(arg => arg["--priority-plugin=".Length..].Trim('"'))
     .Where(p => p.Length > 0)
     .ToList();
 
