@@ -1,5 +1,13 @@
 # Landscape Seam Fixer — Changelog
 
+## v2.2.0 — 2026-09-15
+
+**New: automatic ESL flagging.** The generated fix plugin is now checked for ESL eligibility every run
+(same logic as SSEEdit's own "Find ESP plugins which could be turned into ESL" script) and automatically
+flagged as an ESL if it qualifies — this tool's output almost never adds brand-new records, so it's
+eligible essentially every time. The log reports whether the flag was set and why, so you can always see
+what happened.
+
 ## v2.1.0 — 2026-09-11
 
 **New: "override" trust box.** The existing "Additional trusted plugins" box
