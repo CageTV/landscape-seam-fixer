@@ -1,5 +1,11 @@
 # Landscape Seam Fixer — Changelog
 
+## v2.1.2 — 2026-09-19
+
+Version-number-only release - no code change from v2.2.0 (this repo's own numbering had drifted
+a minor version ahead of the number used on Nexus for the identical ESL-flagging fix). Renumbered
+to stay on the same track as the published Nexus file for consistency across platforms.
+
 ## v2.2.0 — 2026-09-15
 
 **New: automatic ESL flagging.** The generated fix plugin is now checked for ESL eligibility every run

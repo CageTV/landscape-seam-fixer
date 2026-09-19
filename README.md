@@ -1,6 +1,6 @@
 # Landscape Seam Fixer
 
-**Current version: 2.1.0** — see [CHANGELOG.md](CHANGELOG.md) for what's new.
+**Current version: 2.1.2** — see [CHANGELOG.md](CHANGELOG.md) for what's new.
 
 A standalone tool for Skyrim Special Edition / Anniversary Edition that fixes
 **landscape seams** — the cracks, cliffs, holes, and broken roads that appear
