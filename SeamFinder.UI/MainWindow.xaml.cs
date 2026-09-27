@@ -51,7 +51,8 @@ public partial class MainWindow : Window
         string Mo2InstancePath, string Mo2GameDataPath, string Mo2PluginsTxt, string Mo2LoadOrderTxt, string Mo2ModlistTxt,
         string VortexGameDataPath, string DirectGameDataPath, string OutputFolder,
         bool TrustNorthernRoads, bool TrustCsWaterMod, bool TrustWaterForEnb, bool TrustRealisticWaterTwo,
-        string CustomTrustedPluginsText, string? PriorityOverNorthernRoadsPluginsText = null);
+        string CustomTrustedPluginsText, string? PriorityOverNorthernRoadsPluginsText = null,
+        bool TrustSimplicityOfSea = false, string? CustomWaterModsText = null);
 
     void LoadPersistedSettings()
     {
@@ -78,8 +79,10 @@ public partial class MainWindow : Window
             TrustCsWaterModCheck.IsChecked = s.TrustCsWaterMod;
             TrustWaterForEnbCheck.IsChecked = s.TrustWaterForEnb;
             TrustRealisticWaterTwoCheck.IsChecked = s.TrustRealisticWaterTwo;
+            TrustSimplicityOfSeaCheck.IsChecked = s.TrustSimplicityOfSea;
             CustomTrustedPluginsBox.Text = s.CustomTrustedPluginsText;
             PriorityOverNorthernRoadsPluginsBox.Text = s.PriorityOverNorthernRoadsPluginsText ?? ""; // older settings.json files predate this box
+            CustomWaterModsBox.Text = s.CustomWaterModsText ?? ""; // older settings.json files predate this box
             if (!string.IsNullOrEmpty(s.OutputFolder)) OutputFolderBox.Text = s.OutputFolder; // marks _outputFolderAutoSet false via its own TextChanged handler
         }
         catch
@@ -98,7 +101,8 @@ public partial class MainWindow : Window
                 s.Mo2InstancePath, s.Mo2GameDataPath, s.Mo2PluginsTxt, s.Mo2LoadOrderTxt, s.Mo2ModlistTxt,
                 s.VortexGameDataPath, s.DirectGameDataPath, OutputFolderBox.Text.Trim(),
                 s.TrustNorthernRoads, s.TrustCsWaterMod, s.TrustWaterForEnb, s.TrustRealisticWaterTwo,
-                CustomTrustedPluginsBox.Text, PriorityOverNorthernRoadsPluginsBox.Text);
+                CustomTrustedPluginsBox.Text, PriorityOverNorthernRoadsPluginsBox.Text,
+                s.TrustSimplicityOfSea, CustomWaterModsBox.Text);
             Directory.CreateDirectory(Path.GetDirectoryName(SettingsFilePath)!);
             File.WriteAllText(SettingsFilePath, System.Text.Json.JsonSerializer.Serialize(persisted, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
         }
@@ -122,8 +126,8 @@ public partial class MainWindow : Window
                 OutputFolder = outputFolder,
                 s.IsMo2Mode, s.IsVortexMode, s.Mo2InstancePath, s.Mo2GameDataPath,
                 s.VortexGameDataPath, s.DirectGameDataPath, s.TrustNorthernRoads,
-                s.TrustCsWaterMod, s.TrustWaterForEnb, s.TrustRealisticWaterTwo,
-                s.CustomTrustedPlugins, s.PriorityOverNorthernRoadsPlugins,
+                s.TrustCsWaterMod, s.TrustWaterForEnb, s.TrustRealisticWaterTwo, s.TrustSimplicityOfSea,
+                s.CustomTrustedPlugins, s.PriorityOverNorthernRoadsPlugins, s.CustomWaterMods,
             };
             File.WriteAllText(Path.Combine(outputFolder, "settings-used.json"),
                 System.Text.Json.JsonSerializer.Serialize(snapshot, new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
@@ -356,10 +360,11 @@ public partial class MainWindow : Window
         bool IsMo2Mode, bool IsVortexMode,
         string Mo2InstancePath, string Mo2GameDataPath, string Mo2PluginsTxt, string Mo2LoadOrderTxt, string Mo2ModlistTxt,
         string VortexGameDataPath, string DirectGameDataPath, bool TrustNorthernRoads,
-        bool TrustCsWaterMod, bool TrustWaterForEnb, bool TrustRealisticWaterTwo,
-        IReadOnlyList<string> CustomTrustedPlugins, IReadOnlyList<string> PriorityOverNorthernRoadsPlugins)
+        bool TrustCsWaterMod, bool TrustWaterForEnb, bool TrustRealisticWaterTwo, bool TrustSimplicityOfSea,
+        IReadOnlyList<string> CustomTrustedPlugins, IReadOnlyList<string> PriorityOverNorthernRoadsPlugins,
+        IReadOnlyList<string> CustomWaterMods)
     {
-        public WaterTrustOptions WaterTrust => new(TrustCsWaterMod, TrustWaterForEnb, TrustRealisticWaterTwo);
+        public WaterTrustOptions WaterTrust => new(TrustCsWaterMod, TrustWaterForEnb, TrustRealisticWaterTwo, TrustSimplicityOfSea, CustomWaterMods);
     }
 
     void SetBusy(bool busy)
@@ -382,7 +387,9 @@ public partial class MainWindow : Window
         VortexGameDataPathBox.Text.Trim(), DirectGameDataPathBox.Text.Trim(),
         TrustNorthernRoadsCheck.IsChecked == true,
         TrustCsWaterModCheck.IsChecked == true, TrustWaterForEnbCheck.IsChecked == true, TrustRealisticWaterTwoCheck.IsChecked == true,
-        ParseCustomTrustedPlugins(CustomTrustedPluginsBox.Text), ParseCustomTrustedPlugins(PriorityOverNorthernRoadsPluginsBox.Text));
+        TrustSimplicityOfSeaCheck.IsChecked == true,
+        ParseCustomTrustedPlugins(CustomTrustedPluginsBox.Text), ParseCustomTrustedPlugins(PriorityOverNorthernRoadsPluginsBox.Text),
+        ParseCustomTrustedPlugins(CustomWaterModsBox.Text));
 
     async void RunButton_Click(object sender, RoutedEventArgs e)
     {

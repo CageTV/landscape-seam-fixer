@@ -48,7 +48,10 @@ below).
   water-plane/reference-safety caution described below — appropriate for a
   mod that reshapes the entire road network, not just an occasional patch.
 - **Water mods** (separate from landscape entirely) — CS Water Mod, Water
-  for ENB, RealisticWaterTwo, in that priority order. Restores only
+  for ENB, RealisticWaterTwo, Simplicity of Sea (`water mod.esp`), in that
+  priority order, plus an **Other trusted water mods** box in the UI for any
+  other water replacer (exact filename or a `*`-prefix, ranked below the
+  four named ones, in list order). Restores only
   `Water`/`WaterHeight`/water flags, never terrain. Independent of this,
   the tool *always* restores water from any trusted plugin (the same trust
   pool as landscape) whose water genuinely differs from vanilla, whenever a
@@ -135,7 +138,7 @@ no publish step needed for local use.
 3. The **Output folder** auto-fills with a sensible default per mode (an MO2
    mod folder with an auto-generated `meta.ini`, or straight into
    Data for Vortex/Direct) — change it if you want it elsewhere.
-4. Tick **Trust Northern Roads.esp**, any of the three **water mod**
+4. Tick **Trust Northern Roads.esp**, any of the four **water mod**
    checkboxes, and/or fill in **Additional trusted plugins** for anything
    else you want restored — all optional, all off by default.
 5. Click **Run Detection** to generate `LandscapeSeamReport.csv` in the

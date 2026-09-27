@@ -1,5 +1,16 @@
 # Landscape Seam Fixer — Changelog
 
+## v2.1.3 — 2026-09-27
+
+- **Fixed: VHGT `Offset` scaling** ([#2](https://github.com/CageTV/landscape-seam-fixer/issues/2)). The
+  heightmap offset uses the same 8-unit step as the per-vertex deltas; reading it unscaled produced false
+  seam detections. Same fix Road Mask Merger shipped in v1.4.3 — it had never reached this repo.
+- **New water mod: Simplicity of Sea** (`water mod.esp`), as a fourth checkbox ranked below CS Water Mod,
+  Water for ENB and RealisticWaterTwo.
+- **New: "Other trusted water mods" box** in the UI for any other water replacer — one per line, exact
+  filename or a `*`-prefix, ranked below the four named mods in list order.
+- The app now uses the tool family's shared icon.
+
 ## v2.1.2 — 2026-09-19
 
 Version-number-only release - no code change from v2.2.0 (this repo's own numbering had drifted

@@ -57,7 +57,7 @@ public static class HeightmapDecoder
                 if (x == 0)
                 {
                     heights[0, y] = y == 0
-                        ? vhgt.Offset + delta * 8f
+                        ? (vhgt.Offset + delta) * 8f // FIXED (github.com/CageTV/landscape-seam-fixer/issues/2): Offset uses the same 8-unit step as the deltas
                         : heights[0, y - 1] + delta * 8f;
                 }
                 else

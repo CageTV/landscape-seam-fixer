@@ -37,13 +37,21 @@ public record SeamFixResult(int CellsPatched, int EdgesFixed, string OutputPath,
 // entirely separate machinery, though, since Cell.Water/WaterHeight/Flags
 // and Worldspace.Water/LodWater are plain fields, not a distinct
 // sub-record the way Landscape is. In priority order: CS Water Mod wins
-// over Water for ENB, which wins over RealisticWaterTwo, wherever more
-// than one has touched the same cell/worldspace - confirmed by the user
-// as the intended order (their own mod first).
-public record WaterTrustOptions(bool TrustCsWaterMod = false, bool TrustWaterForEnb = false, bool TrustRealisticWaterTwo = false)
+// over Water for ENB, which wins over RealisticWaterTwo, which wins over
+// Simplicity of Sea, wherever more than one has touched the same
+// cell/worldspace - confirmed by the user as the intended order (their
+// own mod first; Simplicity of Sea added 2026-09-19, lowest priority of
+// the 4 as the newest addition). CustomWaterMods is the escape hatch for
+// any OTHER water-replacer mod without its own named checkbox - same
+// exact-name-or-trailing-"*" syntax as TrustResolver's general custom
+// trust list (matched via TrustResolver.MatchesCustomTrust), ranked below
+// all 4 named mods, in list order among themselves.
+public record WaterTrustOptions(
+    bool TrustCsWaterMod = false, bool TrustWaterForEnb = false, bool TrustRealisticWaterTwo = false,
+    bool TrustSimplicityOfSea = false, IReadOnlyList<string>? CustomWaterMods = null)
 {
     public static readonly WaterTrustOptions None = new();
-    public bool Any => TrustCsWaterMod || TrustWaterForEnb || TrustRealisticWaterTwo;
+    public bool Any => TrustCsWaterMod || TrustWaterForEnb || TrustRealisticWaterTwo || TrustSimplicityOfSea || CustomWaterMods is { Count: > 0 };
 }
 
 public static class SeamFixer
@@ -53,24 +61,46 @@ public static class SeamFixer
     // prefix-trust convention elsewhere in this file. Index order IS
     // priority order (lower index wins when more than one family has
     // touched the same record) - see WaterFamilyRank.
+    //
+    // Simplicity of Sea's own plugin is literally named "water mod.esp" -
+    // an unusually generic filename for a mod, and NOT a safe prefix to
+    // widen-match on (unlike "CS Water Mod" or "RealisticWaterTwo", it
+    // could collide with an unrelated mod that happens to start with
+    // "water mod"). Prefix == BaseName here deliberately, so it only ever
+    // exact-matches - no assumed compatibility-patch family. If Simplicity
+    // of Sea patches turn out to follow their own naming convention, add
+    // it as a real prefix then.
     static readonly (string BaseName, string Prefix)[] WaterModFamilies =
     [
         ("CS Water Mod.esp", "CS Water Mod"),
         ("Water for ENB.esp", "Water for ENB"),
         ("RealisticWaterTwo.esp", "RealisticWaterTwo"),
+        ("water mod.esp", "water mod.esp"),
     ];
 
     // Rank of `plugin` among the enabled water families (0 = highest
     // priority), or -1 if it isn't a trusted, enabled water plugin at all.
+    // Falls through to CustomWaterMods (any OTHER water mod the user typed
+    // in) after the 4 named families, ranked lower than all of them and,
+    // among themselves, in the order they were listed.
     static int WaterFamilyRank(string plugin, WaterTrustOptions waterTrust)
     {
-        Span<bool> enabled = [waterTrust.TrustCsWaterMod, waterTrust.TrustWaterForEnb, waterTrust.TrustRealisticWaterTwo];
+        Span<bool> enabled = [waterTrust.TrustCsWaterMod, waterTrust.TrustWaterForEnb, waterTrust.TrustRealisticWaterTwo, waterTrust.TrustSimplicityOfSea];
         for (int i = 0; i < WaterModFamilies.Length; i++)
         {
             if (!enabled[i]) continue;
             var (baseName, prefix) = WaterModFamilies[i];
             if (plugin.Equals(baseName, StringComparison.OrdinalIgnoreCase) || plugin.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                 return i;
+        }
+        var customWaterMods = waterTrust.CustomWaterMods;
+        if (customWaterMods is not null)
+        {
+            for (int i = 0; i < customWaterMods.Count; i++)
+            {
+                if (TrustResolver.MatchesCustomTrust(plugin, [customWaterMods[i]]))
+                    return WaterModFamilies.Length + i;
+            }
         }
         return -1;
     }
@@ -320,8 +350,9 @@ public static class SeamFixer
         }
 
         // Genuine trusted water pass: independent of (and runs BEFORE) the
-        // CS Water Mod/Water for ENB/RealisticWaterTwo priority system
-        // below - that system answers "which of these 3 specific overhaul
+        // named-water-mod priority system below (CS Water Mod, Water for
+        // ENB, RealisticWaterTwo, Simplicity of Sea, plus any CustomWaterMods)
+        // - that system answers "which of these specific overhaul
         // mods should win when they compete," this answers a DIFFERENT
         // question: "did some legitimate water-adding mod's real water get
         // silently lost by a LATER, unrelated override that didn't
@@ -334,7 +365,7 @@ public static class SeamFixer
         // explicitly copy a field loses it" bug this toolkit's own
         // RoadMaskMerger was just fixed for - see its NOTES.md). Neither
         // Half Moon Creek nor its Northern Roads patch was ever a
-        // configured "water mod" in the 3-mod system below, so nothing
+        // configured "water mod" in the named-water-mod system below, so nothing
         // caught this - the height-restoration trust pool is what SHOULD
         // have had an equivalent for water all along, and now does.
         //
@@ -348,7 +379,7 @@ public static class SeamFixer
         // incidentally-touching trusted plugin with no real water opinion
         // here can't silently override a legitimate, deliberate design.
         // Always runs (not gated by waterTrust.Any - this answers a
-        // different question than the specific-3-mod system) and runs
+        // different question than the named-water-mod system) and runs
         // FIRST so that system, when the user has enabled it, still gets
         // final say over any cell it also has an opinion on.
         int cellsGenuineWaterRestored = 0;
@@ -390,7 +421,7 @@ public static class SeamFixer
             cellsGenuineWaterRestored++;
         }
         if (cellsGenuineWaterRestored > 0)
-            log($"Restored genuinely-trusted water in {cellsGenuineWaterRestored} cell(s) (independent of the CS Water Mod/Water for ENB/RealisticWaterTwo system below).");
+            log($"Restored genuinely-trusted water in {cellsGenuineWaterRestored} cell(s) (independent of the named-water-mod system below).");
 
         // Water pass: completely separate from everything above - never
         // reads or writes Landscape, only Cell.Water/WaterHeight/Flags and
