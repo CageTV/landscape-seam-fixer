@@ -154,6 +154,8 @@ void RunFixMode(string[] fixArgs)
         Console.WriteLine();
         Console.WriteLine($"Restored {fixResult.CellsPatched} cell(s) to their trusted plugin's terrain.");
         Console.WriteLine($"Output: {fixResult.OutputPath}");
+        if (fixResult.AllOutputPaths is { Count: > 1 })
+            Console.WriteLine("Split (master limit): enable ALL of: " + string.Join(", ", fixResult.AllOutputPaths.Select(System.IO.Path.GetFileName)));
     }
     catch (Exception ex)
     {

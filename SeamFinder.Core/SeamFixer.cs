@@ -29,7 +29,7 @@ using Noggog;
 
 namespace SeamFinder.Core;
 
-public record SeamFixResult(int CellsPatched, int EdgesFixed, string OutputPath, float WorstSlopeDegrees, List<string> VerificationWarnings);
+public record SeamFixResult(int CellsPatched, int EdgesFixed, string OutputPath, float WorstSlopeDegrees, List<string> VerificationWarnings, IReadOnlyList<string>? AllOutputPaths = null);
 
 // Which water mods (each user-toggled independently) get the same
 // "restore what this mod actually authored, verbatim, whenever something
@@ -490,12 +490,7 @@ public static class SeamFixer
         log(eslResult.Summary);
 
         log($"Writing patch plugin to {outputPath} ...");
-        SkyrimMod.WriteBuilder(SkyrimRelease.SkyrimSE)
-            .ToPath(outputPath, fileSystem: null)
-            .WithNoLoadOrder()
-            .WithDataFolder(dataFolderForWrite)
-            .WithAllParentMasters()
-            .Write(patchMod);
+        var writtenPlugins = PluginSplitWriter.Write(patchMod, outputPath, dataFolderForWrite, log);
 
         log($"Restored {cellsPatched} cell(s) to their trusted plugin's terrain" +
             (cellsSkippedWater > 0 ? $"; skipped {cellsSkippedWater} with their own water plane" : "") +
@@ -505,7 +500,7 @@ public static class SeamFixer
             log($"{verificationWarnings.Count} cell(s) skipped for a reference conflict - worth a manual look if that terrain still looks wrong:");
             foreach (var w in verificationWarnings) log("  " + w);
         }
-        return new SeamFixResult(cellsPatched, cellsPatched, outputPath, 0f, verificationWarnings);
+        return new SeamFixResult(cellsPatched, cellsPatched, outputPath, 0f, verificationWarnings, writtenPlugins);
     }
 
     // ResolveWinningLandscape now lives in HeightmapDecoder.cs, shared with
